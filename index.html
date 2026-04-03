@@ -7,7 +7,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.2/babel.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     body { margin: 0; }
@@ -35,7 +35,7 @@
     };
   </script>
 
-  <script type="text/babel" data-presets="react,env">
+  <script type="text/babel" data-presets="react">
     const { useState, useMemo, useRef, useCallback } = React;
 
 // ─── CATEGORIES ───────────────────────────────────────────────────────────────
@@ -1232,7 +1232,13 @@ function HealthLens() {
 }
 
 
-    ReactDOM.createRoot(document.getElementById('root')).render(<HealthLens />);
+    try {
+      ReactDOM.createRoot(document.getElementById('root')).render(<HealthLens />);
+    } catch(e) {
+      document.getElementById('root').innerHTML =
+        '<div style="padding:24px;font-family:monospace;color:#b91c1c;background:#fef2f2;margin:20px;border-radius:12px;border:1px solid #fca5a5">' +
+        '<b>Render error:</b><br/>' + e.message + '</div>';
+    }
   </script>
 </body>
 </html>

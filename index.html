@@ -7,16 +7,36 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/recharts@2.8.0/umd/Recharts.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <style>body { margin: 0; }</style>
+  <style>
+    body { margin: 0; }
+    #loading { display:flex; align-items:center; justify-content:center; min-height:100vh;
+               font-family:sans-serif; flex-direction:column; gap:12px; color:#64748b; }
+    #error-box { display:none; padding:20px; background:#fef2f2; border:1px solid #fca5a5;
+                 border-radius:12px; max-width:500px; margin:20px auto; font-family:monospace;
+                 font-size:13px; color:#b91c1c; white-space:pre-wrap; }
+  </style>
 </head>
 <body>
-  <div id="root"></div>
-  <script type="text/babel">
+  <div id="root">
+    <div id="loading">
+      <div style="font-size:40px">🩺</div>
+      <div style="font-weight:700;font-size:18px;color:#1e293b">HealthLens</div>
+      <div>Loading app…</div>
+    </div>
+  </div>
+  <div id="error-box"></div>
+
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      document.getElementById('error-box').style.display = 'block';
+      document.getElementById('error-box').textContent = 'Error: ' + msg + '\n\nLine: ' + line + '\nSource: ' + src;
+    };
+  </script>
+
+  <script type="text/babel" data-presets="react,env">
     const { useState, useMemo, useRef, useCallback } = React;
-    const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
 
 // ─── CATEGORIES ───────────────────────────────────────────────────────────────
 const CATEGORIES = [
@@ -438,7 +458,7 @@ ${sessions.length>1?`<h2>📈 Historical Tests (${sessions.length})</h2><table s
   setTimeout(() => win.print(), 500);
 }
 
-// ─── TREND CHART ──────────────────────────────────────────────────────────────
+// ─── TREND CHART (pure SVG — no external library) ─────────────────────────────
 function TrendChart({ marker, sessions }) {
   const data = sessions
     .filter(s => s.values[marker.id] !== undefined && s.values[marker.id] !== "")
@@ -446,26 +466,58 @@ function TrendChart({ marker, sessions }) {
     .filter(d => !isNaN(d.value));
 
   if (data.length < 2) return (
-    <div className="flex items-center justify-center h-32 text-sm text-slate-400 bg-slate-50 rounded-xl border border-slate-100">
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:128,fontSize:14,color:"#94a3b8",background:"#f8fafc",borderRadius:12,border:"1px solid #f1f5f9"}}>
       {data.length === 0 ? "No data for this marker" : "Add at least 2 tests to see a trend"}
     </div>
   );
 
-  const [lo, hi] = marker.optimalRange || [null, null];
+  const W = 480, H = 180, PX = 44, PY = 20;
+  const vals = data.map(d => d.value);
+  const minV = Math.min(...vals), maxV = Math.max(...vals);
+  const pad = (maxV - minV) * 0.15 || 1;
+  const lo = minV - pad, hi = maxV + pad;
+  const toX = i => PX + (i / (data.length - 1 || 1)) * (W - PX - 12);
+  const toY = v => PY + (1 - (v - lo) / (hi - lo)) * (H - PY - 24);
+  const pts = data.map((d,i) => `${toX(i)},${toY(d.value)}`).join(" ");
+  const [oLo, oHi] = marker.optimalRange || [null, null];
+
+  // Y-axis labels (3 ticks)
+  const ticks = [lo, (lo+hi)/2, hi].map(v => ({ v, y: toY(v), lbl: v.toFixed(1) }));
+
   return (
-    <ResponsiveContainer width="100%" height={180}>
-      <LineChart data={data} margin={{ top:8, right:16, bottom:4, left:0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-        <XAxis dataKey="date" tick={{ fontSize:10, fill:"#94a3b8" }} />
-        <YAxis tick={{ fontSize:10, fill:"#94a3b8" }} domain={["auto","auto"]} width={40} />
-        <Tooltip contentStyle={{ fontSize:12, borderRadius:8, border:"1px solid #e2e8f0" }}
-          formatter={v => [`${v} ${marker.unit}`, marker.name]} />
-        {lo !== null && <ReferenceLine y={lo} stroke="#10b981" strokeDasharray="4 2" strokeWidth={1.5} />}
-        {hi !== null && hi < 900 && <ReferenceLine y={hi} stroke="#10b981" strokeDasharray="4 2" strokeWidth={1.5} />}
-        <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2.5}
-          dot={{ r:5, fill:"#3b82f6", strokeWidth:2, stroke:"#fff" }} activeDot={{ r:7 }} />
-      </LineChart>
-    </ResponsiveContainer>
+    <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:180,overflow:"visible"}}>
+      {/* Grid */}
+      {ticks.map((t,i) => (
+        <g key={i}>
+          <line x1={PX} y1={t.y} x2={W-12} y2={t.y} stroke="#f1f5f9" strokeWidth="1"/>
+          <text x={PX-6} y={t.y+4} textAnchor="end" fontSize="9" fill="#94a3b8">{t.lbl}</text>
+        </g>
+      ))}
+      {/* Optimal range band */}
+      {oLo !== null && oHi !== null && oHi < 900 && toY(oLo) > PY && toY(oHi) > PY && (
+        <rect x={PX} y={toY(oHi)} width={W-PX-12} height={toY(oLo)-toY(oHi)}
+          fill="#10b981" fillOpacity="0.08" />
+      )}
+      {oLo !== null && (
+        <line x1={PX} y1={toY(oLo)} x2={W-12} y2={toY(oLo)}
+          stroke="#10b981" strokeDasharray="4 2" strokeWidth="1.5"/>
+      )}
+      {oHi !== null && oHi < 900 && (
+        <line x1={PX} y1={toY(oHi)} x2={W-12} y2={toY(oHi)}
+          stroke="#10b981" strokeDasharray="4 2" strokeWidth="1.5"/>
+      )}
+      {/* Line */}
+      <polyline points={pts} fill="none" stroke="#3b82f6" strokeWidth="2.5"
+        strokeLinejoin="round" strokeLinecap="round"/>
+      {/* Dots + labels */}
+      {data.map((d,i) => (
+        <g key={i}>
+          <circle cx={toX(i)} cy={toY(d.value)} r="5" fill="#3b82f6" stroke="#fff" strokeWidth="2"/>
+          <text x={toX(i)} y={H-6} textAnchor="middle" fontSize="9" fill="#94a3b8">{d.date}</text>
+          <text x={toX(i)} y={toY(d.value)-9} textAnchor="middle" fontSize="9" fontWeight="600" fill="#1e40af">{d.value}</text>
+        </g>
+      ))}
+    </svg>
   );
 }
 
@@ -1180,8 +1232,7 @@ function HealthLens() {
 }
 
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<HealthLens />);
+    ReactDOM.createRoot(document.getElementById('root')).render(<HealthLens />);
   </script>
 </body>
 </html>

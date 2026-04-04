@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>HealthLens — Blood Work Tracker</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script crossorigin src="https://unpkg.com/react@17/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/recharts@2.1.16/umd/Recharts.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <!-- Supabase CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -26,7 +26,6 @@
 
   <script type="text/babel">
     const { useState, useMemo, useRef, useCallback, useEffect } = React;
-    const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
 
 // ─── CATEGORIES ───────────────────────────────────────────────────────────────
 const CATEGORIES = [
@@ -384,33 +383,51 @@ ${sessions.length>1?`<h2>📈 Historical Tests (${sessions.length})</h2><table s
 
 // ─── TREND CHART ──────────────────────────────────────────────────────────────
 function TrendChart({ marker, sessions }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
   const data = sessions
     .filter(s => s.values[marker.id] !== undefined && s.values[marker.id] !== "")
     .map(s => ({ date: fmtDate(s.date), value: parseFloat(s.values[marker.id]) }))
     .filter(d => !isNaN(d.value));
+
+  useEffect(() => {
+    if (!canvasRef.current || data.length < 2) return;
+    if (chartRef.current) chartRef.current.destroy();
+    chartRef.current = new Chart(canvasRef.current, {
+      type: "line",
+      data: {
+        labels: data.map(d => d.date),
+        datasets: [{
+          data: data.map(d => d.value),
+          borderColor: "#3b82f6",
+          backgroundColor: "rgba(59,130,246,0.08)",
+          borderWidth: 2.5,
+          pointRadius: 5,
+          pointBackgroundColor: "#3b82f6",
+          tension: 0.3,
+          fill: true,
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false }, tooltip: {
+          callbacks: { label: ctx => `${ctx.parsed.y} ${marker.unit}` }
+        }},
+        scales: {
+          x: { grid: { color: "#f1f5f9" }, ticks: { font: { size: 10 }, color: "#94a3b8" }},
+          y: { grid: { color: "#f1f5f9" }, ticks: { font: { size: 10 }, color: "#94a3b8" }}
+        }
+      }
+    });
+    return () => { if (chartRef.current) chartRef.current.destroy(); };
+  }, [data.length, marker.id]);
 
   if (data.length < 2) return (
     <div className="flex items-center justify-center h-32 text-sm text-slate-400 bg-slate-50 rounded-xl border border-slate-100">
       {data.length === 0 ? "No data for this marker" : "Add at least 2 tests to see a trend"}
     </div>
   );
-
-  const [lo, hi] = marker.optimalRange || [null, null];
-  return (
-    <ResponsiveContainer width="100%" height={180}>
-      <LineChart data={data} margin={{ top:8, right:16, bottom:4, left:0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-        <XAxis dataKey="date" tick={{ fontSize:10, fill:"#94a3b8" }} />
-        <YAxis tick={{ fontSize:10, fill:"#94a3b8" }} domain={["auto","auto"]} width={40} />
-        <Tooltip contentStyle={{ fontSize:12, borderRadius:8, border:"1px solid #e2e8f0" }}
-          formatter={v => [`${v} ${marker.unit}`, marker.name]} />
-        {lo !== null && <ReferenceLine y={lo} stroke="#10b981" strokeDasharray="4 2" strokeWidth={1.5} />}
-        {hi !== null && hi < 900 && <ReferenceLine y={hi} stroke="#10b981" strokeDasharray="4 2" strokeWidth={1.5} />}
-        <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2.5}
-          dot={{ r:5, fill:"#3b82f6", strokeWidth:2, stroke:"#fff" }} activeDot={{ r:7 }} />
-      </LineChart>
-    </ResponsiveContainer>
-  );
+  return <canvas ref={canvasRef} height={180} />;
 }
 
 // ─── IMPORT MODAL ─────────────────────────────────────────────────────────────

@@ -7,36 +7,26 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone@7.23.2/babel.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.8.0/umd/Recharts.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Supabase CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <style>
-    body { margin: 0; }
-    #loading { display:flex; align-items:center; justify-content:center; min-height:100vh;
-               font-family:sans-serif; flex-direction:column; gap:12px; color:#64748b; }
-    #error-box { display:none; padding:20px; background:#fef2f2; border:1px solid #fca5a5;
-                 border-radius:12px; max-width:500px; margin:20px auto; font-family:monospace;
-                 font-size:13px; color:#b91c1c; white-space:pre-wrap; }
-  </style>
+  <style>body { margin: 0; }</style>
 </head>
 <body>
-  <div id="root">
-    <div id="loading">
-      <div style="font-size:40px">🩺</div>
-      <div style="font-weight:700;font-size:18px;color:#1e293b">HealthLens</div>
-      <div>Loading app…</div>
-    </div>
-  </div>
-  <div id="error-box"></div>
+  <div id="root"></div>
 
+  <!-- Supabase initialisation (must run before Babel/React) -->
   <script>
-    window.onerror = function(msg, src, line, col, err) {
-      document.getElementById('error-box').style.display = 'block';
-      document.getElementById('error-box').textContent = 'Error: ' + msg + '\n\nLine: ' + line + '\nSource: ' + src;
-    };
+    const SUPABASE_URL  = "https://ljwzvnmyviunmykbwquz.supabase.co";
+    const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imxqd3p2bm15dml1bm15a2J3cXV6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMzY4MzksImV4cCI6MjA5MDkxMjgzOX0.lQv2APduNibH3Dzw15DbptB94MIDXXBJOHTOkMLaF1k";
+    const sbClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
   </script>
 
-  <script type="text/babel" data-presets="react">
-    const { useState, useMemo, useRef, useCallback } = React;
+  <script type="text/babel">
+    const { useState, useMemo, useRef, useCallback, useEffect } = React;
+    const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
 
 // ─── CATEGORIES ───────────────────────────────────────────────────────────────
 const CATEGORIES = [
@@ -73,30 +63,21 @@ function getActionIcon(tip) {
 }
 
 // ─── PDF / IMAGE IMPORT ───────────────────────────────────────────────────────
-
-// Extract text from a text-based PDF using only native FileReader — zero CDN deps.
-// Reads raw PDF bytes as latin-1, then pulls text from BT…ET blocks (literal
-// and hex strings). Works for any unencrypted text-based PDF (Quest, LabCorp, etc.)
 async function extractPDFText(file, onProgress) {
   onProgress?.("Reading PDF…");
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = ({ target: { result } }) => {
       onProgress?.("Extracting text from PDF…");
-
-      // Detect encryption before trying to parse
       if (/\/Encrypt[\s/]/.test(result)) {
         reject(new Error("This PDF is password-protected. Please open it in a PDF viewer, print to PDF (to remove the password), and try again."));
         return;
       }
-
       let text = "";
-      // BT…ET text objects — the core of PDF text content
       const btRe = /BT\b([\s\S]*?)\bET\b/g;
       let block;
       while ((block = btRe.exec(result)) !== null) {
         const content = block[1];
-        // Literal strings:  (hello world)
         const litRe = /\(((?:[^\\)]|\\[\s\S])*)\)/g;
         let m;
         while ((m = litRe.exec(content)) !== null) {
@@ -105,7 +86,6 @@ async function extractPDFText(file, onProgress) {
             .replace(/\\\d{3}/g, " ").replace(/\\(.)/g, "$1");
           if (s.trim()) text += s + " ";
         }
-        // Hex strings:  <48656c6c6f>
         const hexRe = /<([0-9a-fA-F\s]{2,})>/g;
         let h;
         while ((h = hexRe.exec(content)) !== null) {
@@ -126,132 +106,91 @@ async function extractPDFText(file, onProgress) {
   });
 }
 
-// For images: no OCR library available in this environment.
-// We throw so the caller catches and shows the image for manual reference.
 async function extractImageText(file, onProgress) {
   throw new Error("Automatic text recognition from images is not available here. The image is shown below — refer to it while entering values manually.");
 }
 
-// Lab pattern definitions — English + Spanish keywords, most-specific first
+// ─── LAB PATTERNS ─────────────────────────────────────────────────────────────
 const LAB_PATTERNS = [
   { id:"glucose",
     name:"Fasting Glucose",   unit:"mg/dL",         range:[40,400],
     kws:["fasting glucose","glucose, serum","glucose, plasma","glucose",
-         // Spanish
          "glucosa en ayunas","glucosa basal","glucemia en ayunas","glucemia basal","glucosa, suero","glucosa"] },
-
   { id:"hba1c",
     name:"HbA1c",             unit:"%",             range:[3,15],
     kws:["hemoglobin a1c","hba1c","glycated hemoglobin","a1c",
-         // Spanish
          "hemoglobina a1c","hemoglobina glicosilada","glucohemoglobina","hba1c"] },
-
   { id:"insulin",
     name:"Fasting Insulin",   unit:"µIU/mL",        range:[0.5,100],
     kws:["fasting insulin","insulin, serum","insulin",
-         // Spanish
          "insulina en ayunas","insulina basal","insulina, suero","insulina"] },
-
   { id:"total_chol",
     name:"Total Cholesterol", unit:"mg/dL",         range:[50,500],
     kws:["cholesterol, total","total cholesterol","cholesterol",
-         // Spanish
          "colesterol total","colesterol, total","colesterol"] },
-
   { id:"ldl",
     name:"LDL Cholesterol",   unit:"mg/dL",         range:[20,400],
     kws:["ldl-cholesterol","ldl cholesterol","ldl chol calc","low density lipoprotein","ldl",
-         // Spanish
          "colesterol ldl","c-ldl","ldl colesterol","lipoproteínas de baja densidad","ldl"] },
-
   { id:"hdl",
     name:"HDL Cholesterol",   unit:"mg/dL",         range:[10,150],
     kws:["hdl-cholesterol","hdl cholesterol","hdl chol","high density lipoprotein","hdl",
-         // Spanish
          "colesterol hdl","c-hdl","hdl colesterol","lipoproteínas de alta densidad","hdl"] },
-
   { id:"triglycerides",
     name:"Triglycerides",     unit:"mg/dL",         range:[20,2000],
     kws:["triglycerides","triglyceride",
-         // Spanish
          "triglicéridos","trigliceridos","triglicérido"] },
-
   { id:"tsh",
     name:"TSH",               unit:"mIU/L",         range:[0.01,20],
     kws:["thyroid stimulating hormone","thyrotropin","tsh",
-         // Spanish
          "hormona estimulante de la tiroides","hormona estimulante tiroides","tirotropina","tsh"] },
-
   { id:"free_t3",
     name:"Free T3",           unit:"pg/mL",         range:[0.5,10],
     kws:["triiodothyronine, free","t3, free","free t3","ft3",
-         // Spanish
          "triyodotironina libre","t3 libre","t3, libre","ft3"] },
-
   { id:"free_t4",
     name:"Free T4",           unit:"ng/dL",         range:[0.1,5],
     kws:["thyroxine, free","t4, free","free t4 (direct)","free t4","ft4",
-         // Spanish
          "tiroxina libre","t4 libre","t4, libre","tetrayodotironina libre","ft4"] },
-
   { id:"vit_d",
     name:"Vitamin D (25-OH)", unit:"ng/mL",         range:[1,150],
     kws:["vitamin d, 25-hydroxy","25-oh vitamin d","25-hydroxyvitamin d","25(oh)d","vitamin d3","vitamin d",
-         // Spanish
          "vitamina d, 25-hidroxi","25-oh vitamina d","25-hidroxivitamina d","calcidiol","vitamina d3","vitamina d"] },
-
   { id:"b12",
     name:"Vitamin B12",       unit:"pg/mL",         range:[50,2000],
     kws:["vitamin b12","cobalamin","b12",
-         // Spanish
          "vitamina b12","cobalamina","cianocobalamina","b12"] },
-
   { id:"ferritin",
     name:"Ferritin",          unit:"ng/mL",         range:[1,1000],
     kws:["ferritin, serum","ferritin",
-         // Spanish
          "ferritina, suero","ferritina sérica","ferritina"] },
-
   { id:"magnesium",
     name:"Serum Magnesium",   unit:"mg/dL",         range:[0.5,5],
     kws:["magnesium, rbc","magnesium, serum","magnesium",
-         // Spanish
          "magnesio, suero","magnesio sérico","magnesio en sangre","magnesio"] },
-
   { id:"hscrp",
     name:"hsCRP",             unit:"mg/L",          range:[0,200],
     kws:["c-reactive protein, hs","c-reactive protein, cardiac","hs-crp","hscrp","c-reactive protein","crp",
-         // Spanish
          "proteína c reactiva ultrasensible","proteína c reactiva, us","pcr ultrasensible","pcr-us","proteína c reactiva","pcr"] },
-
   { id:"homocysteine",
     name:"Homocysteine",      unit:"µmol/L",        range:[1,100],
     kws:["homocyst(e)ine","homocysteine","homocyst",
-         // Spanish
          "homocisteína","homocisteina"] },
-
   { id:"alt",
     name:"ALT",               unit:"U/L",           range:[1,500],
     kws:["alanine aminotransferase","alt (sgpt)","sgpt","alt",
-         // Spanish
          "alanina aminotransferasa","alat","transaminasa glutámico-pirúvica","tgp","sgpt","alt"] },
-
   { id:"ast",
     name:"AST",               unit:"U/L",           range:[1,500],
     kws:["aspartate aminotransferase","ast (sgot)","sgot","ast",
-         // Spanish
          "aspartato aminotransferasa","asat","transaminasa glutámico-oxalacética","tgo","sgot","ast"] },
-
   { id:"creatinine",
     name:"Creatinine",        unit:"mg/dL",         range:[0.3,15],
     kws:["creatinine, serum","creatinine",
-         // Spanish
          "creatinina, suero","creatinina sérica","creatinina"] },
-
   { id:"egfr",
     name:"eGFR",              unit:"mL/min/1.73m²", range:[1,200],
     kws:["egfr non-afr. american","egfr nonafr","estimated gfr","glomerular filtration","egfr","gfr",
-         // Spanish
          "filtrado glomerular estimado","tasa de filtración glomerular","filtración glomerular","tfg","fge","egfr"] },
 ];
 
@@ -259,27 +198,18 @@ function esc(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 function parseLabText(rawText) {
   const results = {};
-  // Normalize to lower-case, collapse multiple spaces, keep newlines
   const text = rawText.replace(/[ \t]+/g, " ").toLowerCase();
-
   for (const { id, kws, range } of LAB_PATTERNS) {
     let found = false;
     for (const kw of kws) {
-      // Find the position of the keyword
       const idx = text.indexOf(kw);
       if (idx === -1) continue;
-
-      // Look at the ~120 chars after the keyword for the first plausible number
-      // Skip "H" / "L" flags and percent signs that immediately follow numbers
       const snippet = text.slice(idx + kw.length, idx + kw.length + 120);
-
-      // Match an integer or decimal; allow optional letter flags like H/L/HH/LL right after
       const numRe = /(\d+\.\d+|\d+)\s*(?:[hl]{1,2}\b)?/gi;
       let m;
       while ((m = numRe.exec(snippet)) !== null) {
         const val = parseFloat(m[1]);
         if (!isNaN(val) && val >= range[0] && val <= range[1]) {
-          // Extra guard: don't grab a year (e.g. 2026)
           if (val > 1900 && val < 2100) continue;
           results[id] = String(val);
           found = true;
@@ -299,7 +229,6 @@ function buildMarkers(profile) {
   const isOlder  = age >= 60;
 
   return [
-    // ── METABOLIC ────────────────────────────────────────────────────────────
     { id:"glucose", category:"metabolic", name:"Fasting Glucose", unit:"mg/dL", placeholder:"e.g. 85",
       optimalRange:[70,85], normalRange:[70,99],
       evaluate:(v)=>v<60?{status:"critical_low",label:"Critically Low"}:v<=85?{status:"optimal",label:"Optimal"}:v<=99?{status:"normal",label:"Normal"}:v<=125?{status:"borderline",label:"Pre-diabetic"}:{status:"critical_high",label:"Diabetic Range"},
@@ -315,7 +244,6 @@ function buildMarkers(profile) {
       evaluate:(v)=>v<=5?{status:"optimal",label:"Optimal"}:v<=10?{status:"normal",label:"Normal"}:v<=20?{status:"borderline",label:"Elevated"}:{status:"elevated",label:"Insulin Resistant"},
       advice:{optimal:["Excellent insulin sensitivity","Keep up resistance training and low-carb diet"],normal:["Consider reducing refined carbs","Time-restricted eating (16:8) can lower insulin"],borderline:["Developing insulin resistance — act now","Reduce carbs, add resistance training + daily walks"],elevated:["Significant insulin resistance — consult your doctor","Screen for fatty liver and metabolic syndrome"]}
     },
-    // ── LIPIDS ───────────────────────────────────────────────────────────────
     { id:"total_chol", category:"lipids", name:"Total Cholesterol", unit:"mg/dL", placeholder:"e.g. 185",
       optimalRange:[120,180], normalRange:[120,200],
       evaluate:(v)=>v<120?{status:"critical_low",label:"Very Low"}:v<=180?{status:"optimal",label:"Optimal"}:v<=200?{status:"normal",label:"Normal"}:v<=239?{status:"borderline",label:"Borderline High"}:{status:"critical_high",label:"High"},
@@ -336,7 +264,6 @@ function buildMarkers(profile) {
       evaluate:(v)=>v<=80?{status:"optimal",label:"Optimal"}:v<=150?{status:"normal",label:"Normal"}:v<=200?{status:"borderline",label:"Borderline High"}:v<=499?{status:"elevated",label:"High"}:{status:"critical_high",label:"Very High"},
       advice:{optimal:["Excellent triglycerides"],normal:["Reduce sugar and alcohol to reach optimal"],borderline:["Reduce sugar, alcohol, and refined carbs","Add omega-3 fish oil 2–4g/day"],elevated:["Eliminate alcohol and added sugars immediately","Test for insulin resistance and metabolic syndrome"],critical_high:["Very high — pancreatitis risk","Seek medical attention urgently"]}
     },
-    // ── THYROID ──────────────────────────────────────────────────────────────
     { id:"tsh", category:"thyroid", name:"TSH", unit:"mIU/L", placeholder:"e.g. 1.5",
       optimalRange:[0.5,2.0], normalRange:[0.5,isOlder?5.5:4.5],
       evaluate:(v)=>{const hi=isOlder?5.5:4.5;return v<0.5?{status:"critical_low",label:"Low — Hyperthyroid?"}:v<=2.0?{status:"optimal",label:"Optimal"}:v<=hi?{status:"normal",label:"Normal"}:v<=10?{status:"borderline",label:"Subclinical Hypo"}:{status:"critical_high",label:"Hypothyroid Range"}},
@@ -352,7 +279,6 @@ function buildMarkers(profile) {
       evaluate:(v)=>v<0.8?{status:"critical_low",label:"Low"}:v>=1.0&&v<=1.5?{status:"optimal",label:"Optimal"}:v>=0.8&&v<=1.8?{status:"normal",label:"Normal"}:{status:"elevated",label:"High"},
       advice:{critical_low:["Low Free T4 points to hypothyroidism — consult your doctor","Ensure adequate iodine intake"],optimal:["Free T4 in the ideal range"],normal:["Normal range — confirm Free T3 is converting well"],elevated:["Elevated Free T4 — consult your doctor to rule out hyperthyroidism"]}
     },
-    // ── VITAMINS ─────────────────────────────────────────────────────────────
     { id:"vit_d", category:"vitamins", name:"Vitamin D (25-OH)", unit:"ng/mL", placeholder:"e.g. 45",
       optimalRange:[50,isOlder?80:70], normalRange:[30,100],
       evaluate:(v)=>{const ol=isOlder?60:50,oh=isOlder?80:70;return v<20?{status:"deficient",label:"Deficient"}:v<30?{status:"insufficient",label:"Insufficient"}:v<ol?{status:"normal",label:"Normal"}:v<=oh?{status:"optimal",label:"Optimal"}:v<=100?{status:"normal",label:"Acceptable"}:{status:"critical_high",label:"Potentially Toxic"}},
@@ -373,7 +299,6 @@ function buildMarkers(profile) {
       evaluate:(v)=>v<1.7?{status:"deficient",label:"Deficient"}:v<1.9?{status:"borderline",label:"Low-Normal"}:v<=2.4?{status:"optimal",label:"Optimal"}:{status:"elevated",label:"Elevated"},
       advice:{deficient:["Supplement magnesium glycinate or malate 300–400mg/day at night","Increase magnesium-rich foods: dark leafy greens, nuts, seeds, dark chocolate"],borderline:["Consider magnesium glycinate 200–300mg at bedtime — also aids sleep"],optimal:["Good magnesium level — maintain with whole foods"],elevated:["Check kidney function (eGFR)","Reduce supplementation temporarily"]}
     },
-    // ── INFLAMMATION ─────────────────────────────────────────────────────────
     { id:"hscrp", category:"inflammation", name:"hsCRP", unit:"mg/L", placeholder:"e.g. 0.8",
       optimalRange:[0,0.5], normalRange:[0,1.0],
       evaluate:(v)=>v<=0.5?{status:"optimal",label:"Optimal"}:v<=1.0?{status:"normal",label:"Low Risk"}:v<=3.0?{status:"borderline",label:"Moderate Risk"}:v<=10?{status:"elevated",label:"High"}:{status:"critical_high",label:"Acute Inflammation"},
@@ -384,7 +309,6 @@ function buildMarkers(profile) {
       evaluate:(v)=>v<=7?{status:"optimal",label:"Optimal"}:v<=10?{status:"normal",label:"Normal"}:v<=15?{status:"borderline",label:"Borderline High"}:v<=30?{status:"elevated",label:"High"}:{status:"critical_high",label:"Very High"},
       advice:{optimal:["Excellent homocysteine — healthy methylation"],normal:["Consider B-complex vitamins to optimize methylation further"],borderline:["Supplement: Methylfolate 400–800mcg + Methylcobalamin 1,000mcg + B6 25mg daily","Consider TMG (trimethylglycine) 500–1,000mg/day"],elevated:["Start high-dose methylated B-vitamins: B12, folate, B6","Test for MTHFR gene variant"],critical_high:["Very high homocysteine — consult your doctor urgently"]}
     },
-    // ── LIVER & KIDNEY ───────────────────────────────────────────────────────
     { id:"alt", category:"liver", name:"ALT (Liver Enzyme)", unit:"U/L", placeholder:"e.g. 22",
       optimalRange:[0,isFemale?20:25], normalRange:[0,isFemale?32:40],
       evaluate:(v)=>{const[o,n,b,h]=isFemale?[20,32,45,80]:[25,40,55,100];return v<=o?{status:"optimal",label:"Optimal"}:v<=n?{status:"normal",label:"Normal"}:v<=b?{status:"borderline",label:"Mildly Elevated"}:v<=h?{status:"elevated",label:"Elevated"}:{status:"critical_high",label:"High — Liver Stress"}},
@@ -458,7 +382,7 @@ ${sessions.length>1?`<h2>📈 Historical Tests (${sessions.length})</h2><table s
   setTimeout(() => win.print(), 500);
 }
 
-// ─── TREND CHART (pure SVG — no external library) ─────────────────────────────
+// ─── TREND CHART ──────────────────────────────────────────────────────────────
 function TrendChart({ marker, sessions }) {
   const data = sessions
     .filter(s => s.values[marker.id] !== undefined && s.values[marker.id] !== "")
@@ -466,58 +390,26 @@ function TrendChart({ marker, sessions }) {
     .filter(d => !isNaN(d.value));
 
   if (data.length < 2) return (
-    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:128,fontSize:14,color:"#94a3b8",background:"#f8fafc",borderRadius:12,border:"1px solid #f1f5f9"}}>
+    <div className="flex items-center justify-center h-32 text-sm text-slate-400 bg-slate-50 rounded-xl border border-slate-100">
       {data.length === 0 ? "No data for this marker" : "Add at least 2 tests to see a trend"}
     </div>
   );
 
-  const W = 480, H = 180, PX = 44, PY = 20;
-  const vals = data.map(d => d.value);
-  const minV = Math.min(...vals), maxV = Math.max(...vals);
-  const pad = (maxV - minV) * 0.15 || 1;
-  const lo = minV - pad, hi = maxV + pad;
-  const toX = i => PX + (i / (data.length - 1 || 1)) * (W - PX - 12);
-  const toY = v => PY + (1 - (v - lo) / (hi - lo)) * (H - PY - 24);
-  const pts = data.map((d,i) => `${toX(i)},${toY(d.value)}`).join(" ");
-  const [oLo, oHi] = marker.optimalRange || [null, null];
-
-  // Y-axis labels (3 ticks)
-  const ticks = [lo, (lo+hi)/2, hi].map(v => ({ v, y: toY(v), lbl: v.toFixed(1) }));
-
+  const [lo, hi] = marker.optimalRange || [null, null];
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:180,overflow:"visible"}}>
-      {/* Grid */}
-      {ticks.map((t,i) => (
-        <g key={i}>
-          <line x1={PX} y1={t.y} x2={W-12} y2={t.y} stroke="#f1f5f9" strokeWidth="1"/>
-          <text x={PX-6} y={t.y+4} textAnchor="end" fontSize="9" fill="#94a3b8">{t.lbl}</text>
-        </g>
-      ))}
-      {/* Optimal range band */}
-      {oLo !== null && oHi !== null && oHi < 900 && toY(oLo) > PY && toY(oHi) > PY && (
-        <rect x={PX} y={toY(oHi)} width={W-PX-12} height={toY(oLo)-toY(oHi)}
-          fill="#10b981" fillOpacity="0.08" />
-      )}
-      {oLo !== null && (
-        <line x1={PX} y1={toY(oLo)} x2={W-12} y2={toY(oLo)}
-          stroke="#10b981" strokeDasharray="4 2" strokeWidth="1.5"/>
-      )}
-      {oHi !== null && oHi < 900 && (
-        <line x1={PX} y1={toY(oHi)} x2={W-12} y2={toY(oHi)}
-          stroke="#10b981" strokeDasharray="4 2" strokeWidth="1.5"/>
-      )}
-      {/* Line */}
-      <polyline points={pts} fill="none" stroke="#3b82f6" strokeWidth="2.5"
-        strokeLinejoin="round" strokeLinecap="round"/>
-      {/* Dots + labels */}
-      {data.map((d,i) => (
-        <g key={i}>
-          <circle cx={toX(i)} cy={toY(d.value)} r="5" fill="#3b82f6" stroke="#fff" strokeWidth="2"/>
-          <text x={toX(i)} y={H-6} textAnchor="middle" fontSize="9" fill="#94a3b8">{d.date}</text>
-          <text x={toX(i)} y={toY(d.value)-9} textAnchor="middle" fontSize="9" fontWeight="600" fill="#1e40af">{d.value}</text>
-        </g>
-      ))}
-    </svg>
+    <ResponsiveContainer width="100%" height={180}>
+      <LineChart data={data} margin={{ top:8, right:16, bottom:4, left:0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+        <XAxis dataKey="date" tick={{ fontSize:10, fill:"#94a3b8" }} />
+        <YAxis tick={{ fontSize:10, fill:"#94a3b8" }} domain={["auto","auto"]} width={40} />
+        <Tooltip contentStyle={{ fontSize:12, borderRadius:8, border:"1px solid #e2e8f0" }}
+          formatter={v => [`${v} ${marker.unit}`, marker.name]} />
+        {lo !== null && <ReferenceLine y={lo} stroke="#10b981" strokeDasharray="4 2" strokeWidth={1.5} />}
+        {hi !== null && hi < 900 && <ReferenceLine y={hi} stroke="#10b981" strokeDasharray="4 2" strokeWidth={1.5} />}
+        <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2.5}
+          dot={{ r:5, fill:"#3b82f6", strokeWidth:2, stroke:"#fff" }} activeDot={{ r:7 }} />
+      </LineChart>
+    </ResponsiveContainer>
   );
 }
 
@@ -526,7 +418,6 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
   const { status, progress, detected, imageUrl, error } = state;
   const found    = detected.filter(d => d.value !== null);
   const notFound = detected.filter(d => d.value === null);
-
   const [pasteText, setPasteText] = useState("");
 
   const subtitleText =
@@ -541,8 +432,6 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
       style={{ background:"rgba(0,0,0,0.55)", backdropFilter:"blur(4px)" }}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col overflow-hidden" style={{ maxHeight:"90vh" }}>
-
-        {/* Header */}
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center text-lg shadow">
@@ -555,11 +444,7 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
           </div>
           <button onClick={onClose} className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-500 text-sm transition-colors">✕</button>
         </div>
-
-        {/* Body */}
         <div className="overflow-y-auto flex-1 p-5">
-
-          {/* Loading */}
           {status === "loading" && (
             <div className="flex flex-col items-center justify-center py-10 gap-4">
               <div className="relative w-16 h-16">
@@ -571,8 +456,6 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
               <p className="text-xs text-slate-400 text-center">Reading values and matching biomarkers</p>
             </div>
           )}
-
-          {/* Error */}
           {status === "error" && (
             <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
               <div className="font-semibold mb-1">⚠️ Could not read file</div>
@@ -580,8 +463,6 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
               <div className="mt-3 text-xs text-red-500">Try a text-based PDF (not a scanned image). For scanned documents, ensure the image is clear and high-resolution.</div>
             </div>
           )}
-
-          {/* Image-only fallback */}
           {status === "image_only" && imageUrl && (
             <div>
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-700 mb-4">
@@ -590,8 +471,6 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
               <img src={imageUrl} alt="Lab report" className="w-full rounded-xl border border-slate-200 shadow-sm" />
             </div>
           )}
-
-          {/* Success: value list */}
           {status === "done" && (
             <div>
               {imageUrl && (
@@ -600,7 +479,6 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
                   <img src={imageUrl} alt="Lab report" className="mt-2 w-full rounded-xl border border-slate-200 shadow-sm" />
                 </details>
               )}
-
               {found.length > 0 && (
                 <>
                   <div className="flex items-center justify-between mb-2">
@@ -614,8 +492,7 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
                   <div className="space-y-1.5 mb-5">
                     {found.map(d => (
                       <label key={d.id} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${d.checked ? "border-blue-300 bg-blue-50" : "border-slate-100 bg-white hover:border-slate-200"}`}>
-                        <input type="checkbox" checked={d.checked} onChange={e => onToggle(d.id, e.target.checked)}
-                          className="w-4 h-4 cursor-pointer" />
+                        <input type="checkbox" checked={d.checked} onChange={e => onToggle(d.id, e.target.checked)} className="w-4 h-4 cursor-pointer" />
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-semibold text-slate-700">{d.name}</div>
                         </div>
@@ -628,7 +505,6 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
                   </div>
                 </>
               )}
-
               {notFound.length > 0 && (
                 <details>
                   <summary className="text-xs font-semibold text-slate-400 cursor-pointer hover:text-slate-600 mb-2">
@@ -641,17 +517,14 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
                   </div>
                 </details>
               )}
-
               {found.length === 0 && (
                 <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 text-sm text-yellow-700">
                   <div className="font-semibold mb-1">No values detected automatically</div>
-                  <div className="mb-3">The PDF may use compressed streams that can't be read directly. Try the paste method instead: open your PDF, select all text (Ctrl/Cmd+A), copy, then use the "Paste Text" button.</div>
+                  <div className="mb-3">The PDF may use compressed streams. Try the paste method instead: open your PDF, select all text (Ctrl/Cmd+A), copy, then use the "Paste Text" button.</div>
                 </div>
               )}
             </div>
           )}
-
-          {/* ── Paste-text mode ── */}
           {status === "paste" && (
             <div className="py-2">
               <p className="text-xs text-slate-500 mb-3 leading-relaxed">
@@ -670,8 +543,6 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
             </div>
           )}
         </div>
-
-        {/* Footer */}
         {status === "paste" && (
           <div className="px-5 py-4 border-t border-slate-100 flex gap-3 shrink-0 bg-white">
             <button onClick={onClose} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-500 hover:bg-slate-50 transition-colors">Cancel</button>
@@ -702,6 +573,136 @@ function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
   );
 }
 
+// ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+function LoginScreen() {
+  const [email,    setEmail]    = useState("");
+  const [password, setPassword] = useState("");
+  const [error,    setError]    = useState("");
+  const [loading,  setLoading]  = useState(false);
+  const [mode,     setMode]     = useState("signin");
+  const [resetSent, setResetSent] = useState(false);
+
+  const cleanErr = msg => {
+    if (msg.includes("Invalid login credentials")) return "Incorrect email or password.";
+    if (msg.includes("User already registered"))   return "An account with this email already exists.";
+    if (msg.includes("Password should be"))        return "Password must be at least 6 characters.";
+    if (msg.includes("Unable to validate email"))  return "Please enter a valid email address.";
+    return msg;
+  };
+
+  const handleEmail = async () => {
+    if (!email || !password) return;
+    setLoading(true); setError("");
+    const fn = mode === "signup"
+      ? sbClient.auth.signUp({ email, password })
+      : sbClient.auth.signInWithPassword({ email, password });
+    const { error: e } = await fn;
+    if (e) { setError(cleanErr(e.message)); setLoading(false); }
+  };
+
+  const handleGoogle = async () => {
+    setLoading(true); setError("");
+    const { error: e } = await sbClient.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (e) { setError(cleanErr(e.message)); setLoading(false); }
+  };
+
+  const handleReset = async () => {
+    if (!email) { setError("Enter your email address first."); return; }
+    setLoading(true); setError("");
+    const { error: e } = await sbClient.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+    setLoading(false);
+    if (e) setError(cleanErr(e.message));
+    else setResetSent(true);
+  };
+
+  return (
+    <div style={{fontFamily:"'Inter',system-ui,sans-serif"}}
+      className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center text-3xl shadow-lg mx-auto mb-4">🩺</div>
+          <h1 className="text-2xl font-bold text-slate-800">HealthLens</h1>
+          <p className="text-sm text-slate-500 mt-1">Track your biomarkers over time</p>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-6">
+          {resetSent ? (
+            <div className="text-center py-4">
+              <div className="text-4xl mb-3">📧</div>
+              <h3 className="font-semibold text-slate-800 mb-2">Check your inbox</h3>
+              <p className="text-sm text-slate-500 mb-4">We sent a password reset link to <strong>{email}</strong>.</p>
+              <button onClick={() => setResetSent(false)} className="text-sm text-blue-600 hover:underline">Back to sign in</button>
+            </div>
+          ) : (
+            <>
+              {/* Google Sign-In */}
+              <button onClick={handleGoogle} disabled={loading}
+                className="w-full flex items-center justify-center gap-3 py-3 px-4 border-2 border-slate-200 rounded-xl text-slate-700 font-semibold text-sm hover:border-blue-300 hover:bg-blue-50 transition-all disabled:opacity-50 mb-4">
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                  <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908C16.658 14.013 17.64 11.706 17.64 9.2z"/>
+                  <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/>
+                  <path fill="#FBBC05" d="M3.964 10.71c-.18-.54-.282-1.117-.282-1.71s.102-1.17.282-1.71V4.958H.957C.347 6.173 0 7.548 0 9s.348 2.827.957 4.042l3.007-2.332z"/>
+                  <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/>
+                </svg>
+                Continue with Google
+              </button>
+
+              <div className="flex items-center gap-3 mb-4">
+                <div className="flex-1 h-px bg-slate-200"/>
+                <span className="text-xs text-slate-400 font-medium">or email</span>
+                <div className="flex-1 h-px bg-slate-200"/>
+              </div>
+
+              {/* Sign in / Sign up toggle */}
+              <div className="flex gap-1 bg-slate-100 rounded-xl p-1 mb-4">
+                {[["signin","Sign In"],["signup","Sign Up"]].map(([m,lbl]) => (
+                  <button key={m} onClick={() => { setMode(m); setError(""); }}
+                    className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all ${mode===m?"bg-white text-slate-800 shadow-sm":"text-slate-500 hover:text-slate-700"}`}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-3">
+                <input type="email" placeholder="Email address" value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"/>
+                <input type="password" placeholder="Password (min 6 chars)" value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => e.key==="Enter" && handleEmail()}
+                  className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"/>
+              </div>
+
+              {error && (
+                <div className="mt-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{error}</div>
+              )}
+
+              <button onClick={handleEmail} disabled={loading || !email || !password}
+                className="w-full mt-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white text-sm font-bold shadow hover:shadow-md transition-all disabled:opacity-40">
+                {loading ? "Loading…" : mode==="signin" ? "Sign In →" : "Create Account →"}
+              </button>
+
+              {mode === "signin" && (
+                <button onClick={handleReset} className="w-full mt-2 text-xs text-slate-400 hover:text-slate-600 transition-colors">
+                  Forgot password?
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        <p className="text-center text-xs text-slate-400 mt-5 leading-relaxed">
+          Your data is private and only accessible to you.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function HealthLens() {
   const [profile,        setProfile]        = useState({ sex:"male", age:35 });
@@ -715,11 +716,16 @@ function HealthLens() {
   const [trendMarkerId,  setTrendMarkerId]  = useState("glucose");
   const [saveMsg,        setSaveMsg]        = useState("");
 
+  // ── Auth & cloud-sync state ────────────────────────────────────────────────
+  const [user,           setUser]           = useState(null);
+  const [authLoading,    setAuthLoading]    = useState(true);
+  const [cloudSyncing,   setCloudSyncing]   = useState(false);
+
   // Import state
   const fileInputRef = useRef(null);
   const [importState, setImportState] = useState({
     open: false, status: "idle", progress: "", detected: [],
-    imageUrl: null, error: null, passwordError: false,
+    imageUrl: null, error: null,
   });
 
   const markers        = useMemo(() => buildMarkers(profile), [profile]);
@@ -737,7 +743,86 @@ function HealthLens() {
     : score >= 55 ? { label:"Needs Attention", grad:"from-yellow-400 to-orange-400" }
     :               { label:"Requires Action", grad:"from-red-400 to-orange-500"    };
 
-  // ── Import handlers ──────────────────────────────────────────────────────────
+  // ── Auth: listen for Supabase session changes ──────────────────────────────
+  useEffect(() => {
+    // Get initial session
+    sbClient.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUser(session.user);
+        loadUserData(session.user.id);
+      } else {
+        setAuthLoading(false);
+      }
+    });
+
+    // Listen for auth changes
+    const { data: { subscription } } = sbClient.auth.onAuthStateChange(async (event, session) => {
+      if (session?.user) {
+        setUser(session.user);
+        if (event === "SIGNED_IN") loadUserData(session.user.id);
+      } else {
+        setUser(null);
+        setProfile({ sex:"male", age:35 });
+        setSessions([]);
+        setCurrentValues({});
+        setAuthLoading(false);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const loadUserData = async (userId) => {
+    try {
+      // Load profile
+      const { data: profileData } = await sbClient
+        .from("profiles")
+        .select("*")
+        .eq("id", userId)
+        .single();
+
+      if (profileData) {
+        setProfile({ sex: profileData.sex || "male", age: profileData.age || 35 });
+      }
+
+      // Load sessions
+      const { data: sessionsData } = await sbClient
+        .from("lab_sessions")
+        .select("*")
+        .eq("user_id", userId)
+        .order("date", { ascending: true });
+
+      if (sessionsData && sessionsData.length > 0) {
+        setSessions(sessionsData.map(s => ({
+          id: s.id,
+          date: s.date,
+          label: s.label,
+          values: s.values,
+        })));
+      }
+    } catch(e) {
+      console.error("Error loading user data:", e);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // ── Sync profile to Supabase (debounced 1s) ───────────────────────────────
+  useEffect(() => {
+    if (!user) return;
+    const t = setTimeout(async () => {
+      try {
+        await sbClient.from("profiles").upsert({
+          id: user.id,
+          sex: profile.sex,
+          age: profile.age,
+        });
+      } catch(e) { console.error("Profile sync error:", e); }
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [profile, user]);
+
+  // ── Import handlers ────────────────────────────────────────────────────────
   const handleFileChosen = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -752,7 +837,7 @@ function HealthLens() {
     }
 
     const imageUrl = isImage ? URL.createObjectURL(file) : null;
-    setImportState({ open:true, status:"loading", progress:"Preparing…", detected:[], imageUrl, error:null, passwordError:false });
+    setImportState({ open:true, status:"loading", progress:"Preparing…", detected:[], imageUrl, error:null });
 
     try {
       let text = "";
@@ -788,7 +873,6 @@ function HealthLens() {
     }));
   };
 
-
   const applyImport = () => {
     const toApply = importState.detected.filter(d => d.checked && d.value !== null);
     setCurrentValues(prev => {
@@ -801,7 +885,7 @@ function HealthLens() {
   };
 
   const openPasteMode = () => {
-    setImportState({ open:true, status:"paste", progress:"", detected:[], imageUrl:null, error:null, passwordError:false });
+    setImportState({ open:true, status:"paste", progress:"", detected:[], imageUrl:null, error:null });
   };
 
   const handleAnalyzeText = (rawText) => {
@@ -814,15 +898,49 @@ function HealthLens() {
     setImportState(s => ({ ...s, status:"done", detected, progress:"" }));
   };
 
-  // ── Test actions ─────────────────────────────────────────────────────────────
-  const saveTest = () => {
+  // ── Test actions ───────────────────────────────────────────────────────────
+  const saveTest = async () => {
     if (!Object.values(currentValues).some(v => v !== "")) return;
-    setSessions(prev =>
-      [...prev, { id:Date.now(), date:currentDate, label:currentLabel.trim()||fmtDate(currentDate), values:{...currentValues} }]
-        .sort((a,b) => a.date.localeCompare(b.date))
-    );
-    setSaveMsg("✓ Saved!"); setCurrentLabel("");
-    setTimeout(() => setSaveMsg(""), 2500);
+    setCloudSyncing(true);
+
+    try {
+      if (user) {
+        // Save to Supabase
+        const { data, error } = await sbClient.from("lab_sessions").insert({
+          user_id: user.id,
+          label: currentLabel.trim() || fmtDate(currentDate),
+          date: currentDate,
+          values: currentValues,
+        }).select().single();
+
+        if (error) throw error;
+
+        const newSession = { id: data.id, date: data.date, label: data.label, values: data.values };
+        setSessions(prev => [...prev, newSession].sort((a,b) => a.date.localeCompare(b.date)));
+      } else {
+        // Fallback: local only
+        const newSession = { id: Date.now(), date: currentDate, label: currentLabel.trim() || fmtDate(currentDate), values: {...currentValues} };
+        setSessions(prev => [...prev, newSession].sort((a,b) => a.date.localeCompare(b.date)));
+      }
+
+      setSaveMsg("✓ Saved!"); setCurrentLabel("");
+      setTimeout(() => setSaveMsg(""), 2500);
+    } catch(e) {
+      console.error("Session save error:", e);
+      setSaveMsg("⚠️ Save failed");
+      setTimeout(() => setSaveMsg(""), 3000);
+    } finally {
+      setCloudSyncing(false);
+    }
+  };
+
+  const deleteSession = async (id) => {
+    setSessions(prev => prev.filter(x => x.id !== id));
+    if (user) {
+      try {
+        await sbClient.from("lab_sessions").delete().eq("id", id).eq("user_id", user.id);
+      } catch(e) { console.error("Session delete error:", e); }
+    }
   };
 
   const NAV = [
@@ -831,16 +949,26 @@ function HealthLens() {
     { id:"profile", label:"⚙️ Profile" },
   ];
 
+  // ── Auth guard ─────────────────────────────────────────────────────────────
+  if (authLoading) return (
+    <div style={{fontFamily:"'Inter',system-ui,sans-serif"}}
+      className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50 flex items-center justify-center">
+      <div className="flex flex-col items-center gap-5">
+        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center text-3xl shadow-lg">🩺</div>
+        <div className="w-8 h-8 rounded-full border-4 border-blue-100 border-t-blue-500 animate-spin"/>
+      </div>
+    </div>
+  );
+  if (!user) return <LoginScreen />;
+
   return (
     <div style={{ fontFamily:"'Inter',system-ui,sans-serif" }} className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
 
-      {/* File input — visually hidden but accessible via label click */}
       <input ref={fileInputRef} type="file" accept=".pdf,image/*"
         id="lab-file-input"
         style={{ position:"absolute", width:1, height:1, opacity:0, overflow:"hidden", clip:"rect(0,0,0,0)", whiteSpace:"nowrap" }}
         onChange={handleFileChosen} />
 
-      {/* Import Modal */}
       {importState.open && (
         <ImportModal
           state={importState}
@@ -851,7 +979,7 @@ function HealthLens() {
         />
       )}
 
-      {/* ── HEADER ─────────────────────────────────────────────────────────── */}
+      {/* ── HEADER ──────────────────────────────────────────────────────────── */}
       <div className="bg-white border-b border-slate-200 px-4 py-3 sticky top-0 z-20 shadow-sm">
         <div className="max-w-5xl mx-auto">
           <div className="flex items-center justify-between mb-3">
@@ -865,7 +993,6 @@ function HealthLens() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {/* File import — label triggers file input (works in sandboxed iframes) */}
               <label
                 htmlFor="lab-file-input"
                 title="Import PDF or image lab report"
@@ -874,7 +1001,6 @@ function HealthLens() {
                 <span className="text-base leading-none">📥</span>
                 <span className="hidden sm:inline">Upload</span>
               </label>
-              {/* Paste text — always works regardless of PDF encoding */}
               <button
                 onClick={openPasteMode}
                 title="Paste copied text from your lab report"
@@ -897,6 +1023,20 @@ function HealthLens() {
                   <div className="text-xs font-medium opacity-90">{scoreMeta.label}</div>
                 </div>
               )}
+
+              {/* User avatar + sign out */}
+              <div className="flex items-center gap-2 border-l border-slate-100 pl-3 ml-1">
+                <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-400 to-cyan-400 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                  {(user.email || "U")[0].toUpperCase()}
+                </div>
+                <span className="text-xs text-slate-500 hidden md:block max-w-[110px] truncate">
+                  {user.email}
+                </span>
+                <button onClick={() => sbClient.auth.signOut()}
+                  className="text-xs text-slate-400 hover:text-slate-700 border border-slate-200 rounded-lg px-2.5 py-1 hover:bg-slate-100 transition-all whitespace-nowrap">
+                  Sign out
+                </button>
+              </div>
             </div>
           </div>
 
@@ -918,11 +1058,7 @@ function HealthLens() {
         {/* ══ CURRENT TEST ════════════════════════════════════════════════════ */}
         {mainTab === "test" && (
           <div className="flex flex-col lg:flex-row gap-5">
-
-            {/* Left: Inputs */}
             <div className="flex-1 min-w-0">
-
-              {/* Category tabs */}
               <div className="flex flex-wrap gap-2 mb-4">
                 {CATEGORIES.map(cat => {
                   const catHasIssue = markers.filter(m=>m.category===cat.id).some(m => {
@@ -941,7 +1077,6 @@ function HealthLens() {
                 })}
               </div>
 
-              {/* Import CTA (empty state) */}
               {!Object.values(currentValues).some(v=>v) && (
                 <div className="mb-4 rounded-2xl border-2 border-dashed border-violet-200 bg-violet-50 p-4">
                   <div className="text-center mb-3">
@@ -963,7 +1098,6 @@ function HealthLens() {
                 </div>
               )}
 
-              {/* Input grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {currentMarkers.map(m => {
                   const raw = currentValues[m.id];
@@ -988,7 +1122,6 @@ function HealthLens() {
                 })}
               </div>
 
-              {/* Save bar */}
               <div className="mt-4 bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex flex-col sm:flex-row items-start sm:items-center gap-3">
                 <div className="flex items-center gap-2 flex-1 flex-wrap">
                   <span className="text-sm text-slate-500 shrink-0">Test date:</span>
@@ -998,7 +1131,8 @@ function HealthLens() {
                     className="flex-1 min-w-0 border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
                 </div>
                 <div className="flex gap-2 items-center">
-                  {saveMsg && <span className="text-xs text-emerald-600 font-semibold">{saveMsg}</span>}
+                  {saveMsg     && <span className="text-xs text-emerald-600 font-semibold">{saveMsg}</span>}
+                  {cloudSyncing && <span className="text-xs text-blue-500 font-medium">☁️ Syncing…</span>}
                   <button onClick={() => setCurrentValues({})} className="text-xs text-slate-400 hover:text-slate-600 border border-slate-200 rounded-lg px-3 py-1.5 transition-all">↺ Clear</button>
                   <button onClick={saveTest} className="text-xs font-semibold bg-blue-600 text-white rounded-lg px-4 py-1.5 hover:bg-blue-700 transition-all shadow-sm">💾 Save Test</button>
                 </div>
@@ -1172,7 +1306,7 @@ function HealthLens() {
                           <div className="flex gap-2 mt-2">
                             <button onClick={() => { setCurrentValues({...s.values}); setCurrentDate(s.date); setMainTab("test"); }}
                               className="flex-1 text-xs font-medium text-blue-600 border border-blue-200 rounded-lg py-1 hover:bg-blue-50 transition-colors">Load</button>
-                            <button onClick={() => setSessions(p => p.filter(x=>x.id!==s.id))}
+                            <button onClick={() => deleteSession(s.id)}
                               className="text-xs font-medium text-slate-400 border border-slate-200 rounded-lg px-3 py-1 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors">✕</button>
                           </div>
                         </div>
@@ -1221,7 +1355,17 @@ function HealthLens() {
                 <div className="flex gap-2"><span className="text-amber-500">60+</span><span><strong>eGFR:</strong> Natural decline noted in recommendations</span></div>
               </div>
               <div className="mt-4 p-3 bg-emerald-50 rounded-xl border border-emerald-100">
-                <p className="text-xs text-emerald-700">✅ Profile saved automatically. All ranges update instantly.</p>
+                <p className="text-xs text-emerald-700">✅ Profile saved automatically to your account. All ranges update instantly.</p>
+              </div>
+
+              {/* Account section */}
+              <div className="mt-6 pt-6 border-t border-slate-100">
+                <h3 className="text-sm font-semibold text-slate-700 mb-1">Account</h3>
+                <p className="text-xs text-slate-400 mb-3">{user.email}</p>
+                <button onClick={() => sbClient.auth.signOut()}
+                  className="w-full py-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-500 hover:bg-slate-50 transition-colors">
+                  Sign out
+                </button>
               </div>
             </div>
           </div>
@@ -1231,14 +1375,8 @@ function HealthLens() {
   );
 }
 
-
-    try {
-      ReactDOM.createRoot(document.getElementById('root')).render(<HealthLens />);
-    } catch(e) {
-      document.getElementById('root').innerHTML =
-        '<div style="padding:24px;font-family:monospace;color:#b91c1c;background:#fef2f2;margin:20px;border-radius:12px;border:1px solid #fca5a5">' +
-        '<b>Render error:</b><br/>' + e.message + '</div>';
-    }
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<HealthLens />);
   </script>
 </body>
 </html>

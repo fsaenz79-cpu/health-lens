@@ -1,0 +1,2229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Innermark</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080808; color: #fff; font-family: 'Inter', system-ui, sans-serif; }
+    ::-webkit-scrollbar { width: 0; }
+    input[type=range] { accent-color: #12BFBF; }
+    input:focus, select:focus, textarea:focus { outline: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+    const SUPABASE_URL  = "https://ljwzvnmyviunmykbwquz.supabase.co";
+    const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imxqd3p2bm15dml1bm15a2J3cXV6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMzY4MzksImV4cCI6MjA5MDkxMjgzOX0.lQv2APduNibH3Dzw15DbptB94MIDXXBJOHTOkMLaF1k";
+    const sbClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
+      auth: { detectSessionInUrl: false, persistSession: true, autoRefreshToken: true, flowType: 'implicit' }
+    });
+    (async () => {
+      const hash = window.location.hash;
+      if (hash && hash.includes('access_token')) {
+        const params = new URLSearchParams(hash.replace('#', ''));
+        const access_token = params.get('access_token');
+        const refresh_token = params.get('refresh_token');
+        if (access_token) {
+          await sbClient.auth.setSession({ access_token, refresh_token });
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+      }
+    })();
+  </script>
+
+  <script type="text/babel">
+    const { useState, useMemo, useRef, useEffect, useCallback } = React;
+
+// ─── COLORS ───────────────────────────────────────────────────────────────────
+const C = { teal:"#12BFBF", orange:"#F58300", red:"#FF453A", bg:"#080808", card:"#111111", border:"#1E1E1E" };
+
+const STATUS_COLOR = {
+  optimal:C.teal, normal:C.teal, borderline:C.orange,
+  elevated:C.orange, insufficient:C.orange, deficient:C.red,
+  critical_low:C.red, critical_high:C.red,
+};
+const STATUS_LABEL = {
+  optimal:"Optimal", normal:"Normal", borderline:"Borderline",
+  elevated:"Elevated", insufficient:"Insufficient", deficient:"Deficient",
+  critical_low:"Critical Low", critical_high:"Critical High",
+};
+const PRIORITY = ["critical_high","critical_low","deficient","elevated","insufficient","borderline","normal","optimal"];
+const DIET_OPTIONS = [
+  { id:"home_cooked", label:"Mostly home cooked" },
+  { id:"balanced",    label:"Balanced / mixed" },
+  { id:"high_protein",label:"High protein / athlete" },
+  { id:"plant_based", label:"Plant-based" },
+  { id:"fast_food",   label:"Fast food / processed" },
+];
+
+function statusColor(s) { return STATUS_COLOR[s] || C.orange; }
+
+// ─── ALTITUDE HELPERS ─────────────────────────────────────────────────────────
+async function getAltitudeFromCoords(lat, lng) {
+  try {
+    const res = await fetch(`https://api.open-meteo.com/v1/elevation?latitude=${lat}&longitude=${lng}`);
+    const data = await res.json();
+    return data.elevation?.[0] ?? 0;
+  } catch { return 0; }
+}
+
+async function getAltitudeFromCity(city) {
+  try {
+    const geo = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`);
+    const gd = await geo.json();
+    if (!gd.results?.length) return null;
+    const { latitude, longitude, name, country } = gd.results[0];
+    const alt = await getAltitudeFromCoords(latitude, longitude);
+    return { altitude: Math.round(alt), cityName: `${name}, ${country}` };
+  } catch { return null; }
+}
+
+// ─── LAB PATTERNS ─────────────────────────────────────────────────────────────
+const LAB_PATTERNS = [
+  { id:"glucose",      name:"Fasting Glucose",   unit:"mg/dL",        range:[40,400],
+    kws:["fasting glucose","glucose, serum","glucose, plasma","glucose",
+         "glucosa en ayunas","glucosa basal","glucemia en ayunas","glucemia basal","glucosa, suero","glucosa","glicemia en ayunas","glicemia basal"] },
+  { id:"hba1c",        name:"HbA1c",             unit:"%",            range:[3,15],
+    kws:["hemoglobin a1c","hba1c","glycated hemoglobin","a1c",
+         "hemoglobina a1c","hemoglobina glicosilada","glucohemoglobina","hba1c","hba1","hemoglobina glucosilada"] },
+  { id:"insulin",      name:"Fasting Insulin",   unit:"µIU/mL",       range:[0.5,100],
+    kws:["fasting insulin","insulin, serum","insulin",
+         "insulina en ayunas","insulina basal","insulina, suero","insulina"] },
+  { id:"total_chol",   name:"Total Cholesterol", unit:"mg/dL",        range:[50,500],
+    kws:["cholesterol, total","total cholesterol","cholesterol",
+         "colesterol total","colesterol, total","colesterol"] },
+  { id:"ldl",          name:"LDL Cholesterol",   unit:"mg/dL",        range:[20,400],
+    kws:["ldl-cholesterol","ldl cholesterol","ldl chol calc","low density lipoprotein","ldl",
+         "colesterol ldl","c-ldl","ldl colesterol","lipoproteínas de baja densidad","lipoproteinas de baja densidad"] },
+  { id:"hdl",          name:"HDL Cholesterol",   unit:"mg/dL",        range:[10,150],
+    kws:["hdl-cholesterol","hdl cholesterol","hdl chol","high density lipoprotein","hdl",
+         "colesterol hdl","c-hdl","hdl colesterol","lipoproteínas de alta densidad","lipoproteinas de alta densidad"] },
+  { id:"triglycerides",name:"Triglycerides",      unit:"mg/dL",        range:[20,2000],
+    kws:["triglycerides","triglyceride","triglicéridos","trigliceridos","triglicérido","triglicerido"] },
+  { id:"tsh",          name:"TSH",               unit:"mIU/L",        range:[0.01,20],
+    kws:["thyroid stimulating hormone","thyrotropin","tsh",
+         "hormona estimulante de la tiroides","hormona estimulante tiroides","tirotropina","hormona tiroestimulante","tsh"] },
+  { id:"free_t3",      name:"Free T3",           unit:"pg/mL",        range:[0.5,10],
+    kws:["triiodothyronine, free","t3, free","free t3","ft3",
+         "triyodotironina libre","t3 libre","t3, libre","ft3","tri-yodotironina libre"] },
+  { id:"free_t4",      name:"Free T4",           unit:"ng/dL",        range:[0.1,5],
+    kws:["thyroxine, free","t4, free","free t4 (direct)","free t4","ft4",
+         "tiroxina libre","t4 libre","t4, libre","tetrayodotironina libre","ft4"] },
+  { id:"vit_d",        name:"Vitamin D (25-OH)", unit:"ng/mL",        range:[1,150],
+    kws:["vitamin d, 25-hydroxy","25-oh vitamin d","25-hydroxyvitamin d","25(oh)d","vitamin d3","vitamin d",
+         "vitamina d, 25-hidroxi","25-oh vitamina d","25-hidroxivitamina d","calcidiol","vitamina d3","vitamina d","25 oh vitamina d"] },
+  { id:"b12",          name:"Vitamin B12",       unit:"pg/mL",        range:[50,2000],
+    kws:["vitamin b12","cobalamin","b12",
+         "vitamina b12","cobalamina","cianocobalamina","b12","vitamina b 12"] },
+  { id:"ferritin",     name:"Ferritin",          unit:"ng/mL",        range:[1,1000],
+    kws:["ferritin, serum","ferritin",
+         "ferritina, suero","ferritina sérica","ferritina serica","ferritina"] },
+  { id:"magnesium",    name:"Serum Magnesium",   unit:"mg/dL",        range:[0.5,5],
+    kws:["magnesium, rbc","magnesium, serum","magnesium",
+         "magnesio, suero","magnesio sérico","magnesio serico","magnesio en sangre","magnesio"] },
+  { id:"hscrp",        name:"hsCRP",             unit:"mg/L",         range:[0,200],
+    kws:["c-reactive protein, hs","c-reactive protein, cardiac","hs-crp","hscrp","c-reactive protein","crp",
+         "proteína c reactiva ultrasensible","proteina c reactiva ultrasensible","proteína c reactiva, us","pcr ultrasensible","pcr-us","proteína c reactiva","proteina c reactiva","pcr","pcr-hs"] },
+  { id:"homocysteine", name:"Homocysteine",      unit:"µmol/L",       range:[1,100],
+    kws:["homocyst(e)ine","homocysteine","homocyst",
+         "homocisteína","homocisteina"] },
+  { id:"alt",          name:"ALT",               unit:"U/L",          range:[1,500],
+    kws:["alanine aminotransferase","alt (sgpt)","sgpt","alt",
+         "alanina aminotransferasa","alat","transaminasa glutámico-pirúvica","transaminasa glutamico-piruvica","tgp","sgpt","tgp-alt","alt-tgp"] },
+  { id:"ast",          name:"AST",               unit:"U/L",          range:[1,500],
+    kws:["aspartate aminotransferase","ast (sgot)","sgot","ast",
+         "aspartato aminotransferasa","asat","transaminasa glutámico-oxalacética","transaminasa glutamico-oxalacetica","tgo","sgot","tgo-ast","ast-tgo"] },
+  { id:"creatinine",   name:"Creatinine",        unit:"mg/dL",        range:[0.3,15],
+    kws:["creatinine, serum","creatinine",
+         "creatinina, suero","creatinina sérica","creatinina serica","creatinina"] },
+  { id:"egfr",         name:"eGFR",              unit:"mL/min/1.73m²",range:[1,200],
+    kws:["egfr non-afr. american","egfr nonafr","estimated gfr","glomerular filtration rate","egfr","gfr",
+         "filtrado glomerular estimado","tasa de filtración glomerular","tasa de filtracion glomerular","filtración glomerular","tfg","fge","tasa filtración glomerular"] },
+  { id:"hemoglobin",   name:"Hemoglobin",        unit:"g/dL",         range:[5,25],
+    kws:["hemoglobin","haemoglobin","hgb","hb",
+         "hemoglobina","haemoglobina","hgb","hb"] },
+  { id:"hematocrit",   name:"Hematocrit",        unit:"%",            range:[20,65],
+    kws:["hematocrit","haematocrit","hct",
+         "hematocrito","hto","htc"] },
+];
+
+function parseLabText(rawText) {
+  const results = {};
+  const text = rawText.replace(/[ \t]+/g, " ").toLowerCase()
+    .replace(/á/g,"a").replace(/é/g,"e").replace(/í/g,"i").replace(/ó/g,"o").replace(/ú/g,"u")
+    .replace(/ñ/g,"n");
+  for (const { id, kws, range } of LAB_PATTERNS) {
+    let found = false;
+    for (const kw of kws) {
+      const kwNorm = kw.toLowerCase()
+        .replace(/á/g,"a").replace(/é/g,"e").replace(/í/g,"i").replace(/ó/g,"o").replace(/ú/g,"u")
+        .replace(/ñ/g,"n");
+      const idx = text.indexOf(kwNorm);
+      if (idx === -1) continue;
+      const snippet = text.slice(idx + kwNorm.length, idx + kwNorm.length + 120);
+      const numRe = /(\d+\.\d+|\d+)\s*(?:[hl]{1,2}\b)?/gi;
+      let m;
+      while ((m = numRe.exec(snippet)) !== null) {
+        const val = parseFloat(m[1]);
+        if (!isNaN(val) && val >= range[0] && val <= range[1]) {
+          if (val > 1900 && val < 2100) continue;
+          results[id] = String(val); found = true; break;
+        }
+      }
+      if (found) break;
+    }
+  }
+  return results;
+}
+
+async function extractPDFText(file, onProgress) {
+  onProgress?.("Reading PDF…");
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = ({ target: { result } }) => {
+      if (/\/Encrypt[\s/]/.test(result)) { reject(new Error("PDF is password-protected. Print to PDF first.")); return; }
+      let text = "";
+      const btRe = /BT\b([\s\S]*?)\bET\b/g;
+      let block;
+      while ((block = btRe.exec(result)) !== null) {
+        const content = block[1];
+        const litRe = /\(((?:[^\\)]|\\[\s\S])*)\)/g;
+        let m;
+        while ((m = litRe.exec(content)) !== null) {
+          const s = m[1].replace(/\\n/g,"\n").replace(/\\r/g," ").replace(/\\t/g," ").replace(/\\\d{3}/g," ").replace(/\\(.)/g,"$1");
+          if (s.trim()) text += s + " ";
+        }
+        const hexRe = /<([0-9a-fA-F\s]{2,})>/g;
+        let h;
+        while ((h = hexRe.exec(content)) !== null) {
+          const hx = h[1].replace(/\s/g,"");
+          let decoded = "";
+          for (let i = 0; i+1 < hx.length; i += 2) {
+            const cp = parseInt(hx.substr(i,2),16);
+            if (cp >= 32 && cp < 127) decoded += String.fromCharCode(cp);
+          }
+          if (decoded.trim()) text += decoded + " ";
+        }
+        text += "\n";
+      }
+      resolve(text.trim());
+    };
+    reader.onerror = () => reject(new Error("Could not read file"));
+    reader.readAsText(file, "latin1");
+  });
+}
+
+// ─── CATEGORIES ───────────────────────────────────────────────────────────────
+const CATEGORIES = [
+  { id:"metabolic",    label:"Metabolic"     },
+  { id:"lipids",       label:"Lipids"        },
+  { id:"thyroid",      label:"Thyroid"       },
+  { id:"vitamins",     label:"Vitamins"      },
+  { id:"inflammation", label:"Inflammation"  },
+  { id:"liver",        label:"Liver & Kidney"},
+  { id:"blood",        label:"Blood Count"   },
+];
+
+// ─── BUILD MARKERS ────────────────────────────────────────────────────────────
+function buildMarkers(profile) {
+  const { sex="male", age=35, exerciseHours=0, dietType="balanced", altitudeM=0 } = profile || {};
+  const isFemale  = sex === "female";
+  const isOlder   = age >= 60;
+  const isAthlete = exerciseHours >= 8;
+  const isHighAlt = altitudeM >= 2000;
+  const isVeryHighAlt = altitudeM >= 3000;
+
+  // Personalized advice builder
+  function personalize(base, extras=[]) {
+    const notes = [];
+    if (isAthlete)    notes.push(...extras.filter(e=>e.tag==="athlete").map(e=>e.tip));
+    if (isHighAlt)    notes.push(...extras.filter(e=>e.tag==="altitude").map(e=>e.tip));
+    if (dietType==="fast_food") notes.push(...extras.filter(e=>e.tag==="fastfood").map(e=>e.tip));
+    if (dietType==="plant_based") notes.push(...extras.filter(e=>e.tag==="plantbased").map(e=>e.tip));
+    return [...base, ...notes];
+  }
+
+  // Altitude-adjusted hemoglobin ranges
+  const hgbOptLo = isFemale ? (isHighAlt?13.5:12.0) : (isHighAlt?15.0:13.5);
+  const hgbOptHi = isFemale ? (isVeryHighAlt?17.5:16.0) : (isVeryHighAlt?19.5:17.5);
+
+  return [
+    { id:"glucose", category:"metabolic", name:"Fasting Glucose", unit:"mg/dL", placeholder:"e.g. 85",
+      optimalRange:[70,85], normalRange:[70,99],
+      evaluate:(v)=>v<60?{status:"critical_low"}:v<=85?{status:"optimal"}:v<=99?{status:"normal"}:v<=125?{status:"borderline"}:{status:"critical_high"},
+      advice:{
+        critical_low: personalize(["Eat immediately","Avoid prolonged fasting","See your doctor if this recurs"],
+          [{tag:"athlete",tip:"Athletes: check if this follows intense training — glycogen depletion can cause transient hypoglycemia"}]),
+        optimal: personalize(["Excellent glycemic control","Maintain low-sugar, high-fiber diet"],
+          [{tag:"athlete",tip:"Maintain carbohydrate timing around training sessions"}]),
+        normal: personalize(["Reduce refined carbs","Add 20–30 min walking after meals"],
+          [{tag:"fastfood",tip:"Processed food is a major driver of elevated glucose — prioritize whole foods"},
+           {tag:"altitude",tip:"At high altitude, glucose metabolism shifts slightly — monitor trends over time"}]),
+        borderline: personalize(["Cut added sugars immediately","Exercise 150+ min/week","Test HbA1c and fasting insulin"],
+          [{tag:"fastfood",tip:"Eliminate ultra-processed foods immediately — they are the primary cause"},
+           {tag:"athlete",tip:"Check for overtraining syndrome which can impair glucose regulation"}]),
+        critical_high: ["See your doctor urgently","Begin low-glycemic diet","Test HbA1c and kidney function"]
+      }
+    },
+    { id:"hba1c", category:"metabolic", name:"HbA1c", unit:"%", placeholder:"e.g. 5.2",
+      optimalRange:[4,5.3], normalRange:[4,5.6],
+      evaluate:(v)=>v<4?{status:"critical_low"}:v<=5.3?{status:"optimal"}:v<=5.6?{status:"normal"}:v<=6.4?{status:"borderline"}:{status:"critical_high"},
+      advice:{
+        critical_low:["Possible hypoglycemia tendency — consult your doctor"],
+        optimal: personalize(["Outstanding 3-month blood sugar average"],
+          [{tag:"altitude",tip:"Note: at very high altitudes (>3000m) HbA1c may read slightly lower due to altered red blood cell turnover"}]),
+        normal:["Reduce carbohydrate intake to optimize further"],
+        borderline: personalize(["Significant lifestyle intervention needed","Discuss with your doctor"],
+          [{tag:"fastfood",tip:"Switch to home-cooked whole foods immediately — this is the most impactful change you can make"}]),
+        critical_high:["Diabetic range — requires medical management"]
+      }
+    },
+    { id:"insulin", category:"metabolic", name:"Fasting Insulin", unit:"µIU/mL", placeholder:"e.g. 5",
+      optimalRange:[2,5], normalRange:[2,10],
+      evaluate:(v)=>v<=5?{status:"optimal"}:v<=10?{status:"normal"}:v<=20?{status:"borderline"}:{status:"elevated"},
+      advice:{
+        optimal: personalize(["Excellent insulin sensitivity"],
+          [{tag:"athlete",tip:"Your training is contributing positively to insulin sensitivity — keep it up"}]),
+        normal:["Consider reducing refined carbs","Time-restricted eating (16:8) can lower insulin"],
+        borderline: personalize(["Developing insulin resistance — act now","Reduce carbs, add resistance training"],
+          [{tag:"fastfood",tip:"Ultra-processed foods are a primary driver of insulin resistance — eliminate them"}]),
+        elevated:["Significant insulin resistance — consult your doctor","Screen for fatty liver and metabolic syndrome"]
+      }
+    },
+    { id:"total_chol", category:"lipids", name:"Total Cholesterol", unit:"mg/dL", placeholder:"e.g. 185",
+      optimalRange:[120,180], normalRange:[120,200],
+      evaluate:(v)=>v<120?{status:"critical_low"}:v<=180?{status:"optimal"}:v<=200?{status:"normal"}:v<=239?{status:"borderline"}:{status:"critical_high"},
+      advice:{
+        critical_low:["Very low cholesterol — add healthy fats","Consult your doctor"],
+        optimal:["Great lipid profile"],
+        normal: personalize(["Consider more omega-3 rich foods","Reduce trans fats"],
+          [{tag:"athlete",tip:"Athletes sometimes run slightly higher total cholesterol — evaluate in context of HDL and LDL ratios"}]),
+        borderline: personalize(["Reduce saturated fat and trans fats","Add omega-3 fish oil 2–4g/day"],
+          [{tag:"fastfood",tip:"Fast food is loaded with trans fats — this is the primary target to eliminate"},
+           {tag:"plantbased",tip:"Ensure you are getting adequate omega-3s from flaxseed, chia, or algae oil"}]),
+        critical_high:["Consult your doctor or cardiologist"]
+      }
+    },
+    { id:"ldl", category:"lipids", name:"LDL Cholesterol", unit:"mg/dL", placeholder:"e.g. 90",
+      optimalRange:[0,70], normalRange:[0,100],
+      evaluate:(v)=>v<=70?{status:"optimal"}:v<=100?{status:"normal"}:v<=130?{status:"borderline"}:v<=159?{status:"elevated"}:{status:"critical_high"},
+      advice:{
+        optimal:["Excellent LDL — very low cardiovascular risk"],
+        normal:["Good LDL — reduce red meat to optimize"],
+        borderline: personalize(["Reduce saturated fats","Increase omega-3s and soluble fiber"],
+          [{tag:"fastfood",tip:"Processed and fried foods are the top driver — eliminate first"},
+           {tag:"plantbased",tip:"Your plant-based diet should help — ensure no coconut/palm oil excess"}]),
+        elevated:["Dietary changes needed urgently","Discuss cardiovascular risk with your doctor"],
+        critical_high:["High cardiovascular risk — consult your doctor urgently"]
+      }
+    },
+    { id:"hdl", category:"lipids", name:"HDL Cholesterol", unit:"mg/dL", placeholder:"e.g. 65",
+      optimalRange:[60,999], normalRange:[isFemale?50:40,999],
+      evaluate:(v)=>{const low=isFemale?50:40,bord=isFemale?60:50;return v<low?{status:"critical_low"}:v<bord?{status:"borderline"}:v<=60?{status:"normal"}:{status:"optimal"}},
+      advice:{
+        critical_low: personalize(["Low HDL — cardiovascular risk factor","Increase aerobic exercise 5x/week"],
+          [{tag:"fastfood",tip:"Processed food diet is strongly linked to low HDL — dietary overhaul is critical"}]),
+        borderline:["Increase aerobic exercise frequency","Add olive oil, nuts, and fatty fish"],
+        normal:["Good HDL — maintain with exercise"],
+        optimal: personalize(["Excellent HDL — highly protective for heart health"],
+          [{tag:"athlete",tip:"Regular aerobic training is a key reason for your high HDL — excellent work"}])
+      }
+    },
+    { id:"triglycerides", category:"lipids", name:"Triglycerides", unit:"mg/dL", placeholder:"e.g. 80",
+      optimalRange:[0,80], normalRange:[0,150],
+      evaluate:(v)=>v<=80?{status:"optimal"}:v<=150?{status:"normal"}:v<=200?{status:"borderline"}:v<=499?{status:"elevated"}:{status:"critical_high"},
+      advice:{
+        optimal:["Excellent triglycerides"],
+        normal:["Reduce sugar and alcohol to reach optimal"],
+        borderline: personalize(["Reduce sugar, alcohol, and refined carbs","Add omega-3 fish oil 2–4g/day"],
+          [{tag:"fastfood",tip:"Sugar and refined carbs in processed foods are the primary driver of elevated triglycerides"}]),
+        elevated:["Eliminate alcohol and added sugars immediately"],
+        critical_high:["Very high — pancreatitis risk — seek medical attention urgently"]
+      }
+    },
+    { id:"tsh", category:"thyroid", name:"TSH", unit:"mIU/L", placeholder:"e.g. 1.5",
+      optimalRange:[0.5,2.0], normalRange:[0.5,isOlder?5.5:4.5],
+      evaluate:(v)=>{const hi=isOlder?5.5:4.5;return v<0.5?{status:"critical_low"}:v<=2.0?{status:"optimal"}:v<=hi?{status:"normal"}:v<=10?{status:"borderline"}:{status:"critical_high"}},
+      advice:{
+        critical_low: personalize(["Low TSH — possible hyperthyroidism","Consult your doctor urgently"],
+          [{tag:"athlete",tip:"Intense overtraining can suppress TSH — consider if training load has increased recently"}]),
+        optimal:["TSH in the ideal functional range"],
+        normal:["Test Free T3 and T4 to confirm conversion"],
+        borderline:["Test thyroid antibodies (TPO, TgAb)","Supplement selenium 200mcg/day"],
+        critical_high:["Overt hypothyroidism — consult your endocrinologist"]
+      }
+    },
+    { id:"free_t3", category:"thyroid", name:"Free T3", unit:"pg/mL", placeholder:"e.g. 3.2",
+      optimalRange:[3.0,4.0], normalRange:[2.3,4.2],
+      evaluate:(v)=>v<2.3?{status:"critical_low"}:v>=3.0&&v<=4.0?{status:"optimal"}:v>=2.3&&v<=4.2?{status:"normal"}:{status:"elevated"},
+      advice:{
+        critical_low: personalize(["Low Free T3 — poor T4→T3 conversion","Supplement selenium 200mcg/day"],
+          [{tag:"athlete",tip:"Undereating relative to training volume (low energy availability) commonly suppresses T3 — check caloric intake"}]),
+        optimal:["Excellent active thyroid hormone level"],
+        normal:["Within normal range — monitor symptoms"],
+        elevated:["Elevated Free T3 — consult your doctor"]
+      }
+    },
+    { id:"free_t4", category:"thyroid", name:"Free T4", unit:"ng/dL", placeholder:"e.g. 1.2",
+      optimalRange:[1.0,1.5], normalRange:[0.8,1.8],
+      evaluate:(v)=>v<0.8?{status:"critical_low"}:v>=1.0&&v<=1.5?{status:"optimal"}:v>=0.8&&v<=1.8?{status:"normal"}:{status:"elevated"},
+      advice:{
+        critical_low:["Low Free T4 — consult your doctor","Ensure adequate iodine intake"],
+        optimal:["Free T4 in the ideal range"],
+        normal:["Normal range — confirm Free T3 is converting well"],
+        elevated:["Elevated Free T4 — consult your doctor"]
+      }
+    },
+    { id:"vit_d", category:"vitamins", name:"Vitamin D (25-OH)", unit:"ng/mL", placeholder:"e.g. 45",
+      optimalRange:[50,isOlder?80:70], normalRange:[30,100],
+      evaluate:(v)=>{const ol=isOlder?60:50,oh=isOlder?80:70;return v<20?{status:"deficient"}:v<30?{status:"insufficient"}:v<ol?{status:"normal"}:v<=oh?{status:"optimal"}:v<=100?{status:"normal"}:{status:"critical_high"}},
+      advice:{
+        deficient: personalize(["Supplement 5,000–10,000 IU/day D3 with K2","30+ min midday sun daily","Retest in 3 months"],
+          [{tag:"altitude",tip:`At ${altitudeM}m altitude, UV radiation is higher — midday sun exposure is particularly effective, use appropriate sun protection`}]),
+        insufficient: personalize(["Supplement D3 3,000–5,000 IU/day with K2"],
+          [{tag:"athlete",tip:"Vitamin D is critical for muscle recovery and immune function in athletes — prioritize optimization"},
+           {tag:"altitude",tip:"Despite higher UV at altitude, indoor living and clothing can still cause deficiency"}]),
+        normal: personalize(["Consider 2,000–3,000 IU/day to reach optimal"],
+          [{tag:"athlete",tip:"Optimal Vitamin D (50–70 ng/mL) supports testosterone production and muscle recovery"}]),
+        optimal:["Excellent Vitamin D level","Maintain with 2,000 IU/day + sun exposure"],
+        critical_high:["Vitamin D toxicity risk — stop high-dose supplementation"]
+      }
+    },
+    { id:"b12", category:"vitamins", name:"Vitamin B12", unit:"pg/mL", placeholder:"e.g. 600",
+      optimalRange:[500,900], normalRange:[200,900],
+      evaluate:(v)=>v<200?{status:"deficient"}:v<400?{status:"borderline"}:v<=900?{status:"optimal"}:{status:"normal"},
+      advice:{
+        deficient:["Critical B12 deficiency — see your doctor urgently"],
+        borderline: personalize(["Supplement methylcobalamin 1,000mcg/day sublingually"],
+          [{tag:"plantbased",tip:"Plant-based diets provide essentially no B12 — supplementation is mandatory, not optional"},
+           {tag:"athlete",tip:"B12 is critical for red blood cell production and energy metabolism in athletes"}]),
+        optimal: personalize(["Great B12 level"],
+          [{tag:"plantbased",tip:"Good — continue your B12 supplementation consistently"}]),
+        normal:["High B12 from supplements is generally safe"]
+      }
+    },
+    { id:"ferritin", category:"vitamins", name:"Ferritin", unit:"ng/mL", placeholder:"e.g. 80",
+      optimalRange:[isFemale?15:30,isFemale?120:200], normalRange:[isFemale?12:20,isFemale?150:250],
+      evaluate:(v)=>{const[d,l,bl,bh,h]=isFemale?[12,25,40,120,200]:[20,30,50,150,300];return v<d?{status:"deficient"}:v<l?{status:"critical_low"}:v<bl?{status:"borderline"}:v<=bh?{status:"optimal"}:v<=h?{status:"borderline"}:{status:"critical_high"}},
+      advice:{
+        deficient: personalize(["Supplement iron bisglycinate 25–50mg with Vitamin C"],
+          [{tag:"athlete",tip:"Athletes have higher iron demands — especially endurance athletes. Impact sports (running) cause hemolysis that depletes iron faster"},
+           {tag:"altitude",tip:`Living at ${altitudeM}m altitude increases red blood cell production, raising iron demand significantly — supplementation is more urgent`},
+           {tag:"plantbased",tip:"Plant-based iron (non-heme) has poor absorption — pair with Vitamin C and avoid calcium and tea within 2 hours"}]),
+        critical_low: personalize(["Low ferritin — fatigue, hair loss, brain fog","Supplement iron bisglycinate 25mg/day"],
+          [{tag:"altitude",tip:"At altitude, your body needs more iron for increased hemoglobin production — low ferritin is particularly impactful here"}]),
+        borderline: personalize(["Consider iron bisglycinate 25mg/day","Avoid tea/coffee with meals"],
+          [{tag:"plantbased",tip:"Cook in cast iron, pair plant iron with Vitamin C, avoid tea within 2h of iron-rich meals"}]),
+        optimal:["Excellent ferritin — iron stores are healthy"],
+        critical_high:["Possible iron overload — consult your doctor urgently"]
+      }
+    },
+    { id:"magnesium", category:"vitamins", name:"Serum Magnesium", unit:"mg/dL", placeholder:"e.g. 2.0",
+      optimalRange:[1.9,2.4], normalRange:[1.7,2.6],
+      evaluate:(v)=>v<1.7?{status:"deficient"}:v<1.9?{status:"borderline"}:v<=2.4?{status:"optimal"}:{status:"elevated"},
+      advice:{
+        deficient: personalize(["Supplement magnesium glycinate 300–400mg/day"],
+          [{tag:"athlete",tip:"Athletes lose significant magnesium through sweat — deficiency causes muscle cramps, poor recovery, and disrupted sleep"},
+           {tag:"fastfood",tip:"Processed food diets are severely lacking in magnesium — whole grains, nuts, and leafy greens are the solution"}]),
+        borderline: personalize(["Consider magnesium glycinate 200–300mg at bedtime"],
+          [{tag:"athlete",tip:"Even borderline magnesium significantly impairs sleep quality and muscle recovery in athletes"}]),
+        optimal:["Good magnesium level"],
+        elevated:["Check kidney function (eGFR)"]
+      }
+    },
+    { id:"hscrp", category:"inflammation", name:"hsCRP", unit:"mg/L", placeholder:"e.g. 0.8",
+      optimalRange:[0,0.5], normalRange:[0,1.0],
+      evaluate:(v)=>v<=0.5?{status:"optimal"}:v<=1.0?{status:"normal"}:v<=3.0?{status:"borderline"}:v<=10?{status:"elevated"}:{status:"critical_high"},
+      advice:{
+        optimal: personalize(["Minimal systemic inflammation"],
+          [{tag:"athlete",tip:"Excellent — your training and recovery practices are keeping inflammation in check"}]),
+        normal:["Low cardiovascular risk from CRP"],
+        borderline: personalize(["Increase omega-3s (fish oil 3–4g EPA+DHA/day)","Reduce sugar and processed foods","Optimize sleep"],
+          [{tag:"athlete",tip:"Post-training inflammation is normal, but chronically elevated CRP suggests overtraining or poor recovery — check sleep and nutrition"},
+           {tag:"altitude",tip:"Altitude exposure can transiently elevate CRP — retest after acclimatization"},
+           {tag:"fastfood",tip:"Processed foods are a primary driver of systemic inflammation — dietary change is the highest-impact intervention"}]),
+        elevated:["Significant inflammation — investigate cause","Rule out infection, autoimmune conditions, or metabolic syndrome"],
+        critical_high:["Acute inflammatory response — see your doctor urgently"]
+      }
+    },
+    { id:"homocysteine", category:"inflammation", name:"Homocysteine", unit:"µmol/L", placeholder:"e.g. 8",
+      optimalRange:[0,7], normalRange:[0,10],
+      evaluate:(v)=>v<=7?{status:"optimal"}:v<=10?{status:"normal"}:v<=15?{status:"borderline"}:v<=30?{status:"elevated"}:{status:"critical_high"},
+      advice:{
+        optimal:["Excellent homocysteine — healthy methylation"],
+        normal:["Consider B-complex vitamins"],
+        borderline: personalize(["Supplement: Methylfolate 400–800mcg + B12 + B6"],
+          [{tag:"plantbased",tip:"Plant-based diets can be low in B12 and B6 — both are critical for homocysteine metabolism"}]),
+        elevated:["High-dose methylated B-vitamins","Test for MTHFR gene variant"],
+        critical_high:["Very high homocysteine — consult your doctor urgently"]
+      }
+    },
+    { id:"alt", category:"liver", name:"ALT", unit:"U/L", placeholder:"e.g. 22",
+      optimalRange:[0,isFemale?20:25], normalRange:[0,isFemale?32:40],
+      evaluate:(v)=>{const[o,n,b,h]=isFemale?[20,32,45,80]:[25,40,55,100];return v<=o?{status:"optimal"}:v<=n?{status:"normal"}:v<=b?{status:"borderline"}:v<=h?{status:"elevated"}:{status:"critical_high"}},
+      advice:{
+        optimal:["Excellent liver health marker"],
+        normal:["Normal ALT — reduce alcohol to optimize"],
+        borderline: personalize(["Mild liver stress — reduce alcohol and sugar"],
+          [{tag:"athlete",tip:"Note: intense exercise (especially weight training) can transiently elevate ALT from muscle breakdown — confirm with AST ratio"},
+           {tag:"fastfood",tip:"Processed food and seed oils are a primary driver of fatty liver and elevated ALT"}]),
+        elevated: personalize(["Eliminate alcohol completely","Get a liver ultrasound"],
+          [{tag:"fastfood",tip:"Non-alcoholic fatty liver disease is strongly linked to processed food diet — dietary overhaul is critical"}]),
+        critical_high:["Possible liver injury — see your doctor urgently"]
+      }
+    },
+    { id:"ast", category:"liver", name:"AST", unit:"U/L", placeholder:"e.g. 20",
+      optimalRange:[0,20], normalRange:[0,40],
+      evaluate:(v)=>v<=20?{status:"optimal"}:v<=40?{status:"normal"}:v<=60?{status:"borderline"}:{status:"critical_high"},
+      advice:{
+        optimal:["Excellent liver and muscle health marker"],
+        normal:["Normal AST — liver and muscle health look good"],
+        borderline: personalize(["Mildly elevated — investigate liver health"],
+          [{tag:"athlete",tip:"Post-exercise AST elevation is common — compare AST:ALT ratio. If >2:1 it suggests muscle rather than liver origin"}]),
+        critical_high:["Elevated AST — consult your doctor"]
+      }
+    },
+    { id:"creatinine", category:"liver", name:"Creatinine", unit:"mg/dL", placeholder:"e.g. 0.9",
+      optimalRange:[isFemale?0.5:0.7,isFemale?0.9:1.1], normalRange:[isFemale?0.5:0.6,isFemale?1.1:1.3],
+      evaluate:(v)=>{const[l,oh,nh,hh]=isFemale?[0.5,0.9,1.1,1.4]:[0.6,1.1,1.3,1.7];return v<l?{status:"borderline"}:v<=oh?{status:"optimal"}:v<=nh?{status:"normal"}:v<=hh?{status:"borderline"}:{status:"critical_high"}},
+      advice:{
+        borderline: personalize(["Low creatinine — consider resistance training"],
+          [{tag:"athlete",tip:"Elevated creatinine post-exercise is normal — retest fasted and rested for accurate baseline"}]),
+        optimal:["Excellent kidney filtration marker"],
+        normal: personalize(["Kidneys appear healthy — stay hydrated"],
+          [{tag:"altitude",tip:`At ${altitudeM}m, staying well hydrated is especially important as altitude increases respiratory water loss`}]),
+        critical_high: personalize(["Elevated creatinine — possible reduced kidney filtration","Increase water intake to 2.5–3L/day"],
+          [{tag:"athlete",tip:"High protein intake and intense training can raise creatinine — ensure optimal hydration (3–4L water/day)"},
+           {tag:"altitude",tip:"Altitude-related dehydration can elevate creatinine — increase fluid intake significantly"}])
+      }
+    },
+    { id:"egfr", category:"liver", name:"eGFR", unit:"mL/min/1.73m²", placeholder:"e.g. 95",
+      optimalRange:[90,999], normalRange:[60,999],
+      evaluate:(v)=>{const t=isOlder?75:90;return v>=t?{status:"optimal"}:v>=60?{status:"borderline"}:v>=30?{status:"elevated"}:{status:"critical_high"}},
+      advice:{
+        optimal: personalize(["Excellent kidney filtration rate"],
+          [{tag:"altitude",tip:"Altitude can cause a mild transient decrease in eGFR during acclimatization — this is normal and reversible"}]),
+        borderline:["Mildly reduced kidney function — monitor closely","Increase hydration to 2–3L/day"],
+        elevated:["Moderate CKD — consult a nephrologist urgently"],
+        critical_high:["Severe kidney dysfunction — urgent medical attention required"]
+      }
+    },
+    { id:"hemoglobin", category:"blood", name:"Hemoglobin", unit:"g/dL", placeholder:"e.g. 14",
+      optimalRange:[hgbOptLo, hgbOptHi], normalRange:[isFemale?11.5:13.0, isFemale?16.0:17.5],
+      evaluate:(v)=>{
+        const lo=isFemale?(isHighAlt?13.5:12.0):(isHighAlt?15.0:13.5);
+        const hi=isFemale?(isVeryHighAlt?17.5:16.0):(isVeryHighAlt?19.5:17.5);
+        const critLo=isFemale?10.0:12.0;
+        const critHi=isFemale?18.0:20.0;
+        return v<critLo?{status:"critical_low"}:v<lo?{status:"borderline"}:v<=hi?{status:"optimal"}:v<=critHi?{status:"borderline"}:{status:"critical_high"}
+      },
+      advice:{
+        critical_low: personalize(["Low hemoglobin — anemia suspected","See your doctor urgently — full blood panel needed"],
+          [{tag:"athlete",tip:"Sports anemia can occur in endurance athletes — check iron, B12, and folate urgently"},
+           {tag:"plantbased",tip:"Plant-based diets require careful attention to iron, B12, and folate to prevent anemia"}]),
+        borderline: personalize(["Low-normal hemoglobin — investigate iron, B12, and folate"],
+          [{tag:"altitude",tip:`At ${altitudeM}m, your body should adapt by raising hemoglobin — borderline levels suggest inadequate iron stores to support this adaptation`}]),
+        optimal: personalize(["Hemoglobin within healthy range"],
+          [{tag:"altitude",tip:`At ${altitudeM}m, slightly elevated hemoglobin is expected and normal — your body is adapting to lower oxygen availability`},
+           {tag:"athlete",tip:"Good hemoglobin supports oxygen delivery during training — maintain iron and B12 intake"}]),
+        critical_high: personalize(["Very high hemoglobin — consult your doctor","Could indicate dehydration or polycythemia"],
+          [{tag:"altitude",tip:"At high altitude, very high hemoglobin can increase blood viscosity — ensure excellent hydration and monitor closely"}])
+      }
+    },
+    { id:"hematocrit", category:"blood", name:"Hematocrit", unit:"%", placeholder:"e.g. 42",
+      optimalRange:[isFemale?36:40, isFemale?(isHighAlt?52:46):(isHighAlt?56:50)], normalRange:[isFemale?33:38, isFemale?48:54],
+      evaluate:(v)=>{
+        const lo=isFemale?36:40; const hi=isFemale?(isHighAlt?52:46):(isHighAlt?56:50);
+        return v<lo?{status:"borderline"}:v<=hi?{status:"optimal"}:v<=60?{status:"borderline"}:{status:"critical_high"}
+      },
+      advice:{
+        borderline:["Low hematocrit — investigate for anemia","Check iron, B12, and folate"],
+        optimal: personalize(["Hematocrit within healthy range"],
+          [{tag:"altitude",tip:`At ${altitudeM}m, slightly elevated hematocrit is a normal adaptation to altitude — your body is increasing oxygen-carrying capacity`}]),
+        critical_high: personalize(["High hematocrit — risk of increased blood viscosity","Ensure excellent hydration"],
+          [{tag:"altitude",tip:"Altitude-induced polycythemia — hydration is critical to prevent complications from elevated blood viscosity"}])
+      }
+    },
+  ];
+}
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+function computeAnalyses(markers, values) {
+  return markers.map(m => {
+    const raw = values[m.id];
+    if (!raw && raw !== 0) return null;
+    const val = parseFloat(raw);
+    if (isNaN(val)) return null;
+    const result = m.evaluate(val);
+    return { ...m, val, result, advice: m.advice[result.status] || [] };
+  }).filter(Boolean);
+}
+
+function computeScore(analyses) {
+  if (!analyses.length) return null;
+  const W = { optimal:100, normal:80, borderline:55, insufficient:50, elevated:40, deficient:20, critical_low:25, critical_high:15 };
+  return Math.round(analyses.reduce((s,a) => s + (W[a.result.status] ?? 50), 0) / analyses.length);
+}
+
+function fmtDate(d) {
+  if (!d) return "";
+  const [y,m,day] = d.split("-");
+  return `${m}/${day}/${y}`;
+}
+
+function calcAge(birthDate) {
+  if (!birthDate) return 35;
+  const today = new Date();
+  const bd = new Date(birthDate);
+  let age = today.getFullYear() - bd.getFullYear();
+  const m = today.getMonth() - bd.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < bd.getDate())) age--;
+  return Math.max(1, Math.min(120, age));
+}
+
+function scoreColor(s) {
+  if (!s) return C.teal;
+  if (s >= 70) return C.teal;
+  if (s >= 55) return C.orange;
+  return C.red;
+}
+function scoreLabel(s) {
+  if (!s) return "";
+  if (s >= 85) return "Excellent";
+  if (s >= 70) return "Good";
+  if (s >= 55) return "Needs attention";
+  return "Requires action";
+}
+
+// ─── HALFTONE CANVAS ──────────────────────────────────────────────────────────
+function drawHalftone(canvas, optimalPct) {
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const PIXEL = 2, GAP = 1, STEP = PIXEL + GAP;
+
+  function seededRand(seed) {
+    const x = Math.sin(seed) * 43758.5453123;
+    return x - Math.floor(x);
+  }
+
+  function lerpColor(t) {
+    const smooth = x => x * x * (3 - 2 * x);
+    let r, g, b;
+    if (t <= 0.5) {
+      const s = smooth(t / 0.5);
+      r = Math.round(18  + s * (6  - 18));
+      g = Math.round(191 + s * (6  - 191));
+      b = Math.round(191 + s * (6  - 191));
+    } else {
+      const s = smooth((t - 0.5) / 0.5);
+      r = Math.round(6  + s * (245 - 6));
+      g = Math.round(6  + s * (131 - 6));
+      b = Math.round(6  + s * (0   - 6));
+    }
+    return [r, g, b];
+  }
+
+  function density(tx, ty) {
+    const hd = Math.pow(2 * Math.abs(tx - 0.5), 1.6);
+    const vwave = Math.sin(ty * Math.PI * 3.5) * 0.4 + Math.sin(ty * Math.PI * 7) * 0.2 + Math.sin(ty * Math.PI * 14) * 0.1;
+    const raw = hd + vwave * (1 - hd) * 0.6;
+    return Math.min(Math.max(0.5 + raw * 0.5, 0), 1);
+  }
+
+  for (let row = 0; row * STEP <= H; row++) {
+    for (let col = 0; col * STEP <= W; col++) {
+      const x = col * STEP, y = row * STEP;
+      const tx = x / W, ty = y / H;
+      const colorT = Math.pow(tx, 0.85);
+      const d = density(tx, ty);
+      const rand = seededRand(col * 1000 + row * 0.137 + col * row * 0.031);
+      const noise = seededRand(col * 7.3 + row * 13.7);
+      const threshold = rand * 0.7 + noise * 0.3;
+      if (d > threshold) {
+        const [r, g, b] = lerpColor(colorT);
+        const alpha = (0.55 + d * 0.35) * 0.70;
+        ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+        ctx.fillRect(x, y, PIXEL, PIXEL);
+      }
+    }
+  }
+}
+
+function ScoreCard({ score, total, attention, optimal }) {
+  const canvasRef = useRef(null);
+  const sc = scoreColor(score);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const rect = canvas.parentElement.getBoundingClientRect();
+    canvas.width  = Math.round(rect.width  * devicePixelRatio);
+    canvas.height = Math.round(rect.height * devicePixelRatio);
+    canvas.style.width  = rect.width  + "px";
+    canvas.style.height = rect.height + "px";
+    const ctx = canvas.getContext('2d');
+    ctx.scale(devicePixelRatio, devicePixelRatio);
+    drawHalftone(canvas, optimal / (total || 1));
+  }, [score, total, optimal]);
+
+  return (
+    <div style={{ position:"relative", borderRadius:20, border:`1px solid ${C.border}`, marginBottom:10, overflow:"hidden", background:"#060606" }}>
+      <canvas ref={canvasRef} style={{ position:"absolute", inset:0, width:"100%", height:"100%", opacity:0.70 }} />
+      <div style={{ position:"absolute", inset:0, background:"linear-gradient(to right,rgba(0,0,0,0.3) 0%,rgba(0,0,0,0.05) 50%,rgba(0,0,0,0.3) 100%)", pointerEvents:"none" }} />
+      <div style={{ position:"relative", zIndex:2, padding:"22px 20px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div>
+          <div style={{ fontSize:11, color:"#888", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:4 }}>Health score</div>
+          <div style={{ fontSize:80, fontWeight:300, lineHeight:1, letterSpacing:"-2px", color:sc }}>{score ?? "—"}</div>
+          <div style={{ fontSize:13, color:sc, marginTop:6 }}>{scoreLabel(score)}</div>
+        </div>
+        <div style={{ textAlign:"right" }}>
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:20, fontWeight:400, color:"#e8e8e8" }}>{total}</div>
+            <div style={{ fontSize:10, color:"#888" }}>markers</div>
+          </div>
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:20, fontWeight:400, color:C.orange }}>{attention}</div>
+            <div style={{ fontSize:10, color:"#888" }}>attention</div>
+          </div>
+          <div>
+            <div style={{ fontSize:20, fontWeight:400, color:C.teal }}>{optimal}</div>
+            <div style={{ fontSize:10, color:"#888" }}>optimal</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── BADGE ────────────────────────────────────────────────────────────────────
+function Badge({ status }) {
+  const col = statusColor(status);
+  return <span style={{ fontSize:10, padding:"2px 8px", borderRadius:20, background:col+"18", color:col, display:"inline-block" }}>{STATUS_LABEL[status]||status}</span>;
+}
+
+// ─── TREND CHART ──────────────────────────────────────────────────────────────
+function TrendChart({ marker, sessions }) {
+  const canvasRef = useRef(null);
+  const chartRef  = useRef(null);
+  const data = sessions
+    .filter(s => s.values[marker.id] !== undefined && s.values[marker.id] !== "")
+    .map(s => ({ date: fmtDate(s.date), value: parseFloat(s.values[marker.id]) }))
+    .filter(d => !isNaN(d.value));
+
+  useEffect(() => {
+    if (!canvasRef.current || data.length < 2) return;
+    if (chartRef.current) chartRef.current.destroy();
+    chartRef.current = new Chart(canvasRef.current, {
+      type:"line",
+      data:{ labels:data.map(d=>d.date), datasets:[{ data:data.map(d=>d.value), borderColor:C.teal, backgroundColor:C.teal+"15", borderWidth:2, pointRadius:4, pointBackgroundColor:C.teal, tension:0.3, fill:true }] },
+      options:{ responsive:true, plugins:{ legend:{display:false}, tooltip:{ backgroundColor:"#1a1a1a", titleColor:"#888", bodyColor:"#fff", callbacks:{ label:ctx=>ctx.parsed.y+" "+marker.unit } } }, scales:{ x:{ grid:{color:"#1a1a1a"}, ticks:{color:"#444",font:{size:10}} }, y:{ grid:{color:"#1a1a1a"}, ticks:{color:"#444",font:{size:10}} } } }
+    });
+    return () => { if (chartRef.current) chartRef.current.destroy(); };
+  }, [data.length, marker.id]);
+
+  if (data.length < 2) return (
+    <div style={{ height:140, display:"flex", alignItems:"center", justifyContent:"center", color:"#333", fontSize:13, background:"#0d0d0d", borderRadius:10 }}>
+      {data.length === 0 ? "No data yet" : "Add 2+ tests to see trend"}
+    </div>
+  );
+  return <canvas ref={canvasRef} height={140} />;
+}
+
+// ─── PROFILE FIELD (stable ref to prevent keyboard dismiss) ──────────────────
+function ProfileField({ label, value, onChange, type="text", placeholder="" }) {
+  const ref = useRef(null);
+  return (
+    <div>
+      <div style={{ fontSize:11, color:"#888", marginBottom:6 }}>{label}</div>
+      <input
+        ref={ref}
+        type={type}
+        defaultValue={value}
+        onBlur={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{ width:"100%", background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 10px", color:"#fff", fontSize:14 }}
+      />
+    </div>
+  );
+}
+
+// ─── DATE OF BIRTH PICKER ────────────────────────────────────────────────────
+function DateOfBirthPicker({ value, onChange }) {
+  const parsed = value ? value.split("-") : ["","",""];
+  const [year, setYear]   = useState(parsed[0]||"");
+  const [month, setMonth] = useState(parsed[1]||"");
+  const [day, setDay]     = useState(parsed[2]||"");
+
+  const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const currentYear = new Date().getFullYear();
+  const years = Array.from({length:100}, (_,i) => currentYear - i);
+  const daysInMonth = (m, y) => {
+    if (!m || !y) return 31;
+    return new Date(Number(y), Number(m), 0).getDate();
+  };
+  const maxDay = daysInMonth(month, year);
+  const days = Array.from({length:maxDay}, (_,i) => i+1);
+
+  useEffect(() => {
+    if (year && month && day) {
+      const d = Math.min(Number(day), daysInMonth(month, year));
+      const padM = String(month).padStart(2,"0");
+      const padD = String(d).padStart(2,"0");
+      onChange(`${year}-${padM}-${padD}`);
+    }
+  }, [year, month, day]);
+
+  const sel = { background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 8px", color:"#fff", fontSize:13, cursor:"pointer" };
+
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:"2fr 1.5fr 1fr", gap:6 }}>
+      <select value={month} onChange={e=>setMonth(e.target.value)} style={sel}>
+        <option value="">Month</option>
+        {months.map((m,i) => <option key={i+1} value={String(i+1).padStart(2,"0")} style={{background:"#1a1a1a"}}>{m}</option>)}
+      </select>
+      <select value={day} onChange={e=>setDay(e.target.value)} style={sel}>
+        <option value="">Day</option>
+        {days.map(d => <option key={d} value={String(d).padStart(2,"0")} style={{background:"#1a1a1a"}}>{d}</option>)}
+      </select>
+      <select value={year} onChange={e=>setYear(e.target.value)} style={sel}>
+        <option value="">Year</option>
+        {years.map(y => <option key={y} value={y} style={{background:"#1a1a1a"}}>{y}</option>)}
+      </select>
+    </div>
+  );
+}
+
+// ─── MARKER INFO DATABASE ─────────────────────────────────────────────────────
+const MARKER_INFO = {
+  glucose: {
+    what: "Fasting glucose measures the concentration of sugar (glucose) in your blood after at least 8 hours without eating. Glucose is your body's primary fuel source.",
+    why: "Chronic elevation in fasting glucose is the earliest detectable sign of insulin resistance and type 2 diabetes — conditions that dramatically increase risk of cardiovascular disease, kidney damage, and neuropathy. The Nurses' Health Study (Harvard) found that fasting glucose above 100 mg/dL significantly increases cardiovascular mortality.",
+    longTerm: { borderline:"Sustained pre-diabetic glucose accelerates vascular aging, increases Alzheimer's risk (now called Type 3 diabetes by some researchers), and predicts cardiovascular events within 10 years.", critical_high:"Uncontrolled diabetic-range glucose causes progressive kidney failure, neuropathy, retinopathy, and doubles cardiovascular risk. Early intervention is highly reversible.", critical_low:"Recurrent hypoglycemia can cause cognitive impairment and cardiac arrhythmias." },
+    questions: [
+      { id:"fasted", text:"Were you fasted before this test?", options:["Yes, 8+ hours","Yes, but less than 8 hours","No, I had eaten recently","Not sure"] },
+      { id:"exercise", text:"Did you exercise intensely in the 24 hours before?", options:["Yes, intense session","Light activity only","No exercise","Not sure"] },
+      { id:"stress", text:"Were you under significant stress or illness around the time of the test?", options:["Yes, high stress/illness","Moderate stress","No unusual stress"] },
+    ],
+    source:"Mayo Clinic, American Diabetes Association, Nurses' Health Study (Harvard)"
+  },
+  hba1c: {
+    what:"HbA1c (glycated hemoglobin) reflects your average blood glucose over the past 2–3 months. It measures the percentage of hemoglobin coated with glucose.",
+    why:"Unlike a single glucose reading, HbA1c is not affected by a single meal or day's stress. It is the gold-standard diagnostic test for diabetes and the strongest long-term predictor of diabetic complications. Peter Attia emphasizes targeting HbA1c below 5.4% for longevity.",
+    longTerm:{ borderline:"Pre-diabetic HbA1c is associated with a 3–10x higher risk of progressing to type 2 diabetes within 5 years. Lifestyle intervention at this stage is highly effective — Diabetes Prevention Program trial showed 58% risk reduction.", critical_high:"HbA1c above 6.5% signals established diabetes and predicts progressive organ damage if uncontrolled." },
+    questions:[
+      { id:"trend", text:"Is this your first HbA1c test or do you have prior results?", options:["First test","It has been stable","It has been trending up","It has improved recently"] },
+      { id:"supplement", text:"Are you currently taking any supplements or medications that may affect blood sugar?", options:["Yes — metformin or similar","Yes — other supplements","No medications"] },
+    ],
+    source:"American Diabetes Association Standards of Care, Diabetes Prevention Program Trial, Peter Attia MD"
+  },
+  insulin: {
+    what:"Fasting insulin measures how much insulin your pancreas is producing after a period of fasting. Insulin is the hormone that moves glucose from blood into cells.",
+    why:"Fasting insulin is often a more sensitive early marker of metabolic dysfunction than glucose. Elevated fasting insulin — even with normal glucose — indicates insulin resistance. Dr. Robert Lustig and Peter Attia both identify high fasting insulin as a central driver of metabolic disease.",
+    longTerm:{ borderline:"Elevated fasting insulin with normal glucose is called 'compensated insulin resistance' — the pancreas is working harder to maintain normal sugar levels. This phase is fully reversible with lifestyle changes.", elevated:"Sustained insulin resistance drives fat storage, chronic inflammation, non-alcoholic fatty liver disease, and ultimately type 2 diabetes." },
+    questions:[
+      { id:"fasted", text:"Were you fasted for at least 8 hours before this test?", options:["Yes, 8+ hours","Less than 8 hours","Not sure"] },
+      { id:"carbs", text:"In the days before the test, how was your carbohydrate intake?", options:["Normal for me","Higher than usual","Lower than usual — I was avoiding carbs"] },
+    ],
+    source:"Cleveland Clinic, Robert Lustig MD, Peter Attia MD — 'Outlive'"
+  },
+  total_chol: {
+    what:"Total cholesterol is the sum of all cholesterol in your blood: LDL, HDL, VLDL, and other lipoproteins. Cholesterol is essential for cell membrane structure, hormone production, and vitamin D synthesis.",
+    why:"Total cholesterol alone is a poor predictor of cardiovascular risk. The ratio of LDL to HDL is far more informative. High total cholesterol driven by high HDL is not concerning — high total cholesterol driven by high LDL is. The Framingham Heart Study established cholesterol's relationship with cardiovascular risk.",
+    longTerm:{ borderline:"Borderline total cholesterol requires context — check LDL particle number and HDL. Mayo Clinic recommends evaluating in conjunction with other risk factors.", critical_high:"Persistently high total cholesterol, when driven by LDL, is associated with atherosclerotic plaque formation over decades." },
+    questions:[
+      { id:"fasted", text:"Were you fasted before this test?", options:["Yes, 10-12 hours","Less than 8 hours — I had eaten","Not sure"] },
+      { id:"diet_recent", text:"Had you made any significant dietary changes in the weeks before?", options:["No, eating normally","I was eating more than usual","I was on a specific diet"] },
+      { id:"family", text:"Is there a family history of high cholesterol or heart disease?", options:["Yes","No","Not sure"] },
+    ],
+    source:"Framingham Heart Study, Mayo Clinic Cholesterol Guidelines"
+  },
+  ldl: {
+    what:"LDL (Low-Density Lipoprotein) is often called 'bad' cholesterol. It carries cholesterol from the liver to cells throughout the body. Excess LDL can deposit in artery walls forming plaques.",
+    why:"LDL particle number (LDL-P) and LDL particle size are more predictive of cardiovascular risk than LDL-C alone. Peter Attia and the Cleveland Clinic both emphasize that small, dense LDL particles are particularly dangerous. The INTERHEART study found LDL one of the strongest modifiable risk factors for MI.",
+    longTerm:{ borderline:"Borderline LDL over decades contributes to atherosclerotic plaque buildup. The process is slow but cumulative — starting intervention early has disproportionate long-term benefit.", elevated:"Elevated LDL significantly accelerates atherosclerosis. Each 1 mmol/L reduction in LDL reduces cardiovascular event risk by ~20% (CTT Collaboration meta-analysis).", critical_high:"High LDL combined with other risk factors (hypertension, smoking, family history) dramatically increases 10-year cardiovascular event risk." },
+    questions:[
+      { id:"fasted", text:"Were you fasted 10-12 hours before this lipid panel?", options:["Yes","No, I had eaten","Not sure — it was a routine draw"] },
+      { id:"diet_fat", text:"In the weeks before, how was your saturated fat intake?", options:["Higher than usual (red meat, dairy, processed)","Normal for me","Lower than usual — I was being careful"] },
+      { id:"exercise_recent", text:"Did you have any intense exercise in the 48 hours before?", options:["Yes, heavy training","Light activity","No exercise"] },
+    ],
+    source:"CTT Collaboration Meta-Analysis, INTERHEART Study, Peter Attia MD — 'Outlive', Cleveland Clinic"
+  },
+  hdl: {
+    what:"HDL (High-Density Lipoprotein) is called 'good' cholesterol. It transports cholesterol from arteries back to the liver for excretion. HDL also has anti-inflammatory and anti-oxidative properties.",
+    why:"Higher HDL is consistently associated with lower cardiovascular risk. The Framingham Heart Study found that every 1 mg/dL increase in HDL reduces cardiovascular risk by 2–3% in men and 3–4% in women. Aerobic exercise is one of the most effective ways to raise HDL.",
+    longTerm:{ critical_low:"Chronically low HDL is an independent risk factor for cardiovascular disease, even with normal LDL. It also correlates with insulin resistance and metabolic syndrome.", borderline:"Borderline HDL signals metabolic inefficiency. The good news: aerobic exercise, healthy fats (olive oil, nuts, fatty fish), and reducing refined carbs are highly effective at raising HDL." },
+    questions:[
+      { id:"exercise_habit", text:"How regularly do you do aerobic exercise?", options:["Daily or near-daily","3-4 times per week","1-2 times per week","Rarely or never"] },
+      { id:"alcohol", text:"Do you regularly consume alcohol?", options:["Yes — moderate amounts","Yes — more than moderate","No","Occasionally"] },
+      { id:"smoking", text:"Do you smoke or use tobacco?", options:["Yes, currently","Former smoker","Never"] },
+    ],
+    source:"Framingham Heart Study, Mayo Clinic, Harvard Health"
+  },
+  triglycerides: {
+    what:"Triglycerides are fats stored in your blood and fat cells. After eating, your body converts unused calories into triglycerides. They are a key energy source but excess levels are harmful.",
+    why:"High triglycerides are a hallmark of metabolic syndrome and insulin resistance. The Copenhagen Heart Study found triglycerides are an independent risk factor for cardiovascular disease. Dr. Attia notes that fasting triglycerides below 80 mg/dL is an excellent longevity target.",
+    longTerm:{ borderline:"Borderline triglycerides indicate early metabolic stress — usually driven by sugar, refined carbs, and alcohol. Dietary changes alone often normalize them within weeks.", elevated:"Elevated triglycerides above 200 mg/dL significantly increase pancreatitis risk and cardiovascular risk, particularly in combination with low HDL.", critical_high:"Very high triglycerides above 500 mg/dL carry risk of acute pancreatitis and require urgent medical intervention." },
+    questions:[
+      { id:"fasted", text:"Were you fasted 10-12 hours before this test?", options:["Yes, 10+ hours","8 hours or less","I had eaten","Not sure"] },
+      { id:"alcohol_recent", text:"Did you consume alcohol in the 48 hours before the test?", options:["Yes — significant amount","1-2 drinks","No"] },
+      { id:"sugar", text:"How was your sugar and refined carb intake in the days before?", options:["Higher than usual","Normal for me","I was eating very clean"] },
+    ],
+    source:"Copenhagen Heart Study, Peter Attia MD — 'Outlive', American Heart Association"
+  },
+  tsh: {
+    what:"TSH (Thyroid Stimulating Hormone) is produced by the pituitary gland. It signals the thyroid to produce T4, which converts to the active hormone T3. TSH is the primary screening test for thyroid function.",
+    why:"The thyroid regulates metabolism, energy, body temperature, heart rate, and brain function. Even subtle thyroid dysfunction significantly impacts quality of life and metabolic health. The American Thyroid Association considers optimal TSH to be 0.5–2.5 mIU/L for most adults.",
+    longTerm:{ borderline:"Subclinical hypothyroidism (TSH 4.5–10) is associated with elevated cardiovascular risk, depression, cognitive decline, and fatigue. Treatment is often beneficial — evidence supports intervention when TSH > 10.", critical_low:"Hyperthyroidism accelerates heart rate, bone loss, and can cause dangerous cardiac arrhythmias if untreated.", critical_high:"Overt hypothyroidism severely impairs metabolism, raises cardiovascular risk, and causes significant cognitive and physical decline." },
+    questions:[
+      { id:"time_of_draw", text:"What time was your blood drawn for this test?", options:["Morning (before 10am)","Midday","Afternoon or evening","Not sure"] },
+      { id:"thyroid_meds", text:"Are you currently taking any thyroid medication or supplements?", options:["Yes — levothyroxine or similar","Yes — iodine or selenium supplements","No medications"] },
+      { id:"symptoms", text:"Are you experiencing any of these symptoms?", options:["Fatigue and weight gain (hypothyroid)","Anxiety, heat sensitivity, weight loss (hyperthyroid)","No notable symptoms","Multiple symptoms from both lists"] },
+    ],
+    source:"American Thyroid Association, Mayo Clinic, Cleveland Clinic Thyroid Guidelines"
+  },
+  free_t3: {
+    what:"Free T3 (Triiodothyronine) is the active form of thyroid hormone at the cellular level. T4 must be converted to T3 to have metabolic effect. Free T3 is unbound and biologically active.",
+    why:"Many patients have normal TSH and T4 but low Free T3, meaning poor T4-to-T3 conversion. This is often missed by standard thyroid panels. Low T3 causes fatigue, depression, cold intolerance, and metabolic slowdown even when TSH appears normal. Peter Attia emphasizes measuring Free T3 as part of a complete thyroid evaluation.",
+    longTerm:{ critical_low:"Chronically low T3 (even with normal TSH) is associated with metabolic slowdown, depression, poor recovery from exercise, and impaired cognitive function. Low T3 syndrome is common in athletes and dieters." },
+    questions:[
+      { id:"diet_calories", text:"Have you been in a caloric deficit or dieting recently?", options:["Yes — significant caloric restriction","Moderate restriction","No — eating at maintenance or above"] },
+      { id:"exercise_load", text:"How intense has your training been recently?", options:["Very intense — high volume training","Moderate training","Light or no training"] },
+      { id:"selenium", text:"Do you supplement with selenium?", options:["Yes — 100-200mcg daily","No","Not sure"] },
+    ],
+    source:"Peter Attia MD, American Thyroid Association, Journal of Clinical Endocrinology"
+  },
+  free_t4: {
+    what:"Free T4 (Thyroxine) is the storage form of thyroid hormone produced by the thyroid gland. It circulates in the blood and is converted to the active Free T3 in peripheral tissues.",
+    why:"Free T4 tells us whether the thyroid gland is producing sufficient hormone. Low Free T4 with high TSH confirms primary hypothyroidism. Normal Free T4 with low Free T3 suggests a conversion problem rather than thyroid gland failure.",
+    longTerm:{ critical_low:"Low Free T4 with elevated TSH confirms primary hypothyroidism — a progressive condition that without treatment causes increasing metabolic, cardiac, and cognitive impairment." },
+    questions:[
+      { id:"biotin", text:"Are you taking biotin supplements?", options:["Yes — high dose (5,000+ mcg)","Low dose (under 1,000 mcg)","No"] },
+      { id:"symptoms", text:"Do you experience cold hands/feet, fatigue, dry skin, or weight gain?", options:["Yes — several of these","One or two occasionally","No"] },
+    ],
+    source:"American Thyroid Association, Mayo Clinic Endocrinology"
+  },
+  vit_d: {
+    what:"Vitamin D (25-hydroxyvitamin D) is a fat-soluble hormone precursor produced by skin exposed to UVB sunlight, and obtained from food and supplements. It acts as a hormone affecting nearly every cell in the body.",
+    why:"Vitamin D receptors are found in over 200 human genes. It regulates immune function, calcium metabolism, muscle function, mood (serotonin synthesis), and cardiovascular health. The Endocrine Society defines deficiency as below 20 ng/mL. Dr. Rhonda Patrick and the Grassroots Health initiative support targeting 60–80 ng/mL for optimal health.",
+    longTerm:{ deficient:"Vitamin D deficiency is associated with increased risk of autoimmune disease, depression, cardiovascular disease, cancer (particularly colorectal), and bone loss (osteoporosis). Stanford Medicine links deficiency to 35% higher all-cause mortality.", insufficient:"Insufficient levels impair immune defense, increase inflammation, and reduce muscle recovery — particularly relevant for athletes.", optimal:"Optimal Vitamin D supports immune surveillance against cancer cells, reduces inflammatory cytokines, and is associated with longer telomere length in studies by researchers including Dr. Rhonda Patrick." },
+    questions:[
+      { id:"sun_exposure", text:"How much direct sun exposure do you typically get?", options:["30+ minutes daily","Occasional sun (a few times/week)","Minimal — mostly indoors","Extensive but use high SPF always"] },
+      { id:"supplement_d", text:"Are you currently supplementing with Vitamin D?", options:["Yes — 1,000-2,000 IU/day","Yes — 3,000-5,000 IU/day","Yes — above 5,000 IU/day","No supplements"] },
+      { id:"skin_tone", text:"What best describes your skin tone?", options:["Very light / fair","Medium / olive","Dark / deep"] },
+    ],
+    source:"Endocrine Society Clinical Guidelines, Dr. Rhonda Patrick (FoundMyFitness), Grassroots Health, Stanford Medicine"
+  },
+  b12: {
+    what:"Vitamin B12 (cobalamin) is an essential water-soluble vitamin found almost exclusively in animal products. It is critical for DNA synthesis, red blood cell formation, and the maintenance of the myelin sheath protecting nerve fibers.",
+    why:"B12 deficiency progresses silently and causes irreversible neurological damage if uncorrected. The Mayo Clinic notes that symptoms — numbness, cognitive decline, megaloblastic anemia — can take years to become apparent. Plant-based diets, metformin use, and aging (reduced intrinsic factor) dramatically increase deficiency risk.",
+    longTerm:{ deficient:"Deficiency causes megaloblastic anemia, progressive peripheral neuropathy (numbness, tingling), and cognitive decline that can mimic early dementia. Neurological damage may be irreversible if deficiency is prolonged.", borderline:"Sub-optimal B12 elevates homocysteine, increasing cardiovascular and cognitive decline risk — a key concern for longevity researchers including David Sinclair." },
+    questions:[
+      { id:"diet_animal", text:"How often do you consume animal products (meat, fish, eggs, dairy)?", options:["Daily","Several times a week","Rarely","Never — fully plant-based"] },
+      { id:"metformin", text:"Do you take metformin or any diabetes medication?", options:["Yes","No","Not sure"] },
+      { id:"supplement_b12", text:"Do you supplement with B12?", options:["Yes — methylcobalamin","Yes — cyanocobalamin","No supplements"] },
+    ],
+    source:"Mayo Clinic, Cleveland Clinic, David Sinclair PhD — 'Lifespan'"
+  },
+  ferritin: {
+    what:"Ferritin is a protein that stores iron inside cells. Serum ferritin is the most sensitive test for total body iron stores — it reflects how much iron is banked for future use in hemoglobin synthesis and cellular processes.",
+    why:"Iron is essential for oxygen transport, energy production (mitochondrial function), DNA synthesis, and immune function. Ferritin is considered the best single marker for iron status. Peter Attia targets ferritin of 100–150 ng/mL for optimal performance. Note: ferritin is also an acute-phase reactant — elevated ferritin can indicate inflammation even with adequate iron stores.",
+    longTerm:{ deficient:"Iron depletion without anemia still causes fatigue, cognitive impairment, impaired exercise capacity, and hair loss. In athletes, it significantly reduces VO2max and performance. For pregnant women, low ferritin increases risk of preterm birth.", critical_low:"Severe iron deficiency progresses to iron-deficiency anemia — a major cause of fatigue, reduced immunity, and impaired cognitive function globally.", critical_high:"Chronically elevated ferritin (iron overload, hereditary hemochromatosis) causes liver cirrhosis, heart failure, diabetes, and joint disease." },
+    questions:[
+      { id:"symptoms_iron", text:"Are you experiencing any of these symptoms?", options:["Fatigue, weakness, shortness of breath","Hair loss or brittle nails","Cognitive fog or difficulty concentrating","No notable symptoms"] },
+      { id:"diet_iron", text:"How regularly do you consume red meat or iron-rich foods?", options:["Daily","Several times a week","Rarely or never"] },
+      { id:"female_period", text:"(If applicable) Do you experience heavy menstrual periods?", options:["Yes — heavy flow","No or light flow","Not applicable"] },
+    ],
+    source:"Peter Attia MD — 'Outlive', Mayo Clinic Iron Deficiency Guidelines, World Health Organization"
+  },
+  magnesium: {
+    what:"Magnesium is the fourth most abundant mineral in the body and a cofactor in over 300 enzymatic reactions, including ATP production, DNA repair, protein synthesis, and muscle/nerve function.",
+    why:"Magnesium deficiency is extremely common — estimated at 48% of the US population — yet it is often missed because serum magnesium only reflects 1% of total body magnesium. Dr. Rhonda Patrick identifies magnesium as critical for DNA repair pathways and sleep quality. It is essential for Vitamin D activation, making it a crucial co-factor for Vitamin D supplementation.",
+    longTerm:{ deficient:"Chronic magnesium deficiency is associated with hypertension, insulin resistance, cardiovascular disease, osteoporosis, migraines, anxiety, and poor sleep. Low magnesium impairs Vitamin D conversion even when supplementing D3.", borderline:"Sub-optimal magnesium impairs sleep quality, exercise recovery, and stress resilience — all key longevity levers." },
+    questions:[
+      { id:"sleep", text:"How would you describe your sleep quality?", options:["Poor — I struggle to fall or stay asleep","Moderate — occasionally disrupted","Good — I sleep well most nights"] },
+      { id:"muscle_cramps", text:"Do you experience muscle cramps, especially at night?", options:["Yes — frequently","Occasionally","Rarely or never"] },
+      { id:"supplement_mg", text:"Do you currently supplement magnesium?", options:["Yes — glycinate or malate","Yes — oxide (less absorbable)","No supplements"] },
+    ],
+    source:"Dr. Rhonda Patrick (FoundMyFitness), Mayo Clinic, Journal of the American College of Nutrition"
+  },
+  hscrp: {
+    what:"hsCRP (high-sensitivity C-reactive protein) is a protein produced by the liver in response to inflammation. The 'high-sensitivity' version detects even very low levels relevant to cardiovascular risk.",
+    why:"hsCRP is one of the best validated inflammatory biomarkers for cardiovascular risk prediction. The JUPITER trial (Harvard Medical School) showed that people with normal LDL but elevated hsCRP benefit significantly from statin therapy. Below 0.5 mg/L is considered the optimal longevity target by Peter Attia.",
+    longTerm:{ borderline:"Chronically elevated hsCRP (1–3 mg/L) doubles the risk of cardiovascular events independent of cholesterol levels. It also predicts risk of type 2 diabetes, Alzheimer's disease, and all-cause mortality.", elevated:"hsCRP above 3 mg/L indicates significant systemic inflammation and places individuals in the high cardiovascular risk category. The JUPITER trial found this level warrants intervention." },
+    questions:[
+      { id:"illness", text:"Have you had any infection, illness, injury, or dental work in the past 2–4 weeks?", options:["Yes — active or recent infection","Minor illness (cold, etc.)","No recent illness"] },
+      { id:"sleep_quality", text:"How has your sleep been in the past few weeks?", options:["Poor — under 6 hours or disrupted frequently","Moderate — some disruption","Good — 7+ hours consistently"] },
+      { id:"diet_quality", text:"How has your diet quality been recently?", options:["High in processed foods and sugar","Mixed — some healthy and some not","Mostly anti-inflammatory (vegetables, fish, olive oil)"] },
+    ],
+    source:"JUPITER Trial (Harvard Medical School/Brigham Women's), Peter Attia MD — 'Outlive', Cleveland Clinic"
+  },
+  homocysteine: {
+    what:"Homocysteine is an amino acid produced from methionine metabolism. It requires B vitamins (B12, folate, B6) to be properly recycled. Elevated levels indicate impaired methylation — a fundamental cellular process.",
+    why:"Elevated homocysteine damages arterial walls directly, promotes blood clots, and accelerates cognitive decline. Dr. David Sinclair identifies methylation impairment (of which homocysteine is a marker) as a key driver of biological aging. The HPFS (Harvard) found elevated homocysteine doubles the risk of heart attack.",
+    longTerm:{ borderline:"Borderline homocysteine is strongly associated with accelerated cognitive aging, vascular damage, and impaired DNA methylation — a key epigenetic aging mechanism highlighted by David Sinclair.", elevated:"Elevated homocysteine above 15 µmol/L is classified as moderate hyperhomocysteinemia — significantly increasing risk of stroke, dementia, and cardiovascular events." },
+    questions:[
+      { id:"b_vitamins", text:"Do you supplement with B vitamins (B12, folate, B6)?", options:["Yes — methylated forms (methylfolate, methylcobalamin)","Yes — standard forms","No supplements"] },
+      { id:"diet_b12", text:"How often do you consume B12-rich foods (meat, fish, eggs, dairy)?", options:["Daily","A few times a week","Rarely or never"] },
+      { id:"mthfr", text:"Have you been tested for the MTHFR gene variant?", options:["Yes — I am MTHFR positive","Yes — I am MTHFR negative","No, never tested"] },
+    ],
+    source:"Harvard HPFS Study, David Sinclair PhD — 'Lifespan', VITACOG Trial (Oxford)"
+  },
+  alt: {
+    what:"ALT (Alanine Aminotransferase) is an enzyme found primarily in liver cells. When liver cells are damaged or inflamed, ALT leaks into the bloodstream. It is the most specific marker of liver cell damage.",
+    why:"ALT is the primary screening test for liver health. It detects fatty liver disease, hepatitis, medication-induced liver injury, and alcohol-related damage. The Cleveland Clinic considers ALT above 25 U/L in women and 33 U/L in men as concerning — lower than traditional lab reference ranges.",
+    longTerm:{ borderline:"Mildly elevated ALT often indicates non-alcoholic fatty liver disease (NAFLD), which now affects 25% of the global population. NAFLD progresses silently to cirrhosis if unaddressed — lifestyle intervention reverses it at early stages.", elevated:"Elevated ALT above 2x upper limit suggests significant liver inflammation. Untreated, this can progress to fibrosis, cirrhosis, and hepatocellular carcinoma." },
+    questions:[
+      { id:"exercise_48h", text:"Did you do intense physical exercise in the 48 hours before this test?", options:["Yes — heavy resistance training or intense cardio","Moderate exercise","No significant exercise"] },
+      { id:"alcohol_week", text:"How much alcohol did you consume in the week before this test?", options:["None","1-2 drinks total","3-7 drinks","More than 7 drinks"] },
+      { id:"medications", text:"Are you currently taking any medications, NSAIDs, or herbal supplements?", options:["Yes — prescription medication","Yes — OTC medications (ibuprofen, acetaminophen, etc.)","Yes — herbal supplements","No medications"] },
+    ],
+    source:"Cleveland Clinic Liver Guidelines, American Association for Study of Liver Diseases, Mayo Clinic"
+  },
+  ast: {
+    what:"AST (Aspartate Aminotransferase) is an enzyme found in the liver, heart muscle, skeletal muscle, kidneys, and red blood cells. Because it exists in multiple organs, it is less liver-specific than ALT.",
+    why:"The AST:ALT ratio is diagnostically informative. A ratio above 2:1 suggests alcoholic liver disease; a ratio below 1:1 suggests non-alcoholic fatty liver or muscle damage. Post-exercise AST elevation is common and clinically insignificant.",
+    longTerm:{ borderline:"Consistently elevated AST warrants investigation — particularly when occurring alongside elevated ALT, which confirms liver rather than muscle origin.", critical_high:"High AST with high ALT indicates significant liver damage and requires prompt medical evaluation." },
+    questions:[
+      { id:"exercise_48h", text:"Did you perform heavy resistance training in the 48 hours before this test?", options:["Yes — very intense session","Moderate training","No exercise"] },
+      { id:"alcohol_week", text:"How much alcohol did you consume in the week before this test?", options:["None","1-7 standard drinks","More than 7 drinks"] },
+      { id:"alt_result", text:"Was your ALT also elevated in this same test?", options:["Yes — both elevated","No — only AST was elevated","Not sure"] },
+    ],
+    source:"American Association for Study of Liver Diseases, Cleveland Clinic"
+  },
+  creatinine: {
+    what:"Creatinine is a waste product from muscle metabolism (creatine breakdown). It is filtered entirely by the kidneys, making it a key indicator of kidney filtration function.",
+    why:"Because creatinine production is relatively constant (proportional to muscle mass), elevated serum creatinine reliably indicates reduced kidney filtration capacity (GFR). The National Kidney Foundation uses creatinine to calculate eGFR, the standard measure of kidney function.",
+    longTerm:{ critical_high:"Progressively rising creatinine indicates declining kidney function (CKD). Early-stage CKD is often asymptomatic but highly manageable with lifestyle changes. Advanced CKD dramatically increases cardiovascular risk and may ultimately require dialysis." },
+    questions:[
+      { id:"hydration", text:"How was your hydration in the 24-48 hours before this test?", options:["Well hydrated — drinking 2L+ water","Normal hydration","I may have been dehydrated","I exercised heavily without enough fluid replacement"] },
+      { id:"protein_intake", text:"How is your dietary protein intake?", options:["Very high — over 2g per kg body weight","Moderate — around 1.5g/kg","Standard protein intake"] },
+      { id:"nsaid_use", text:"Do you regularly use NSAIDs (ibuprofen, naproxen, aspirin)?", options:["Yes — daily or near-daily","Occasionally","Rarely or never"] },
+    ],
+    source:"National Kidney Foundation, Mayo Clinic Nephrology, Cleveland Clinic"
+  },
+  egfr: {
+    what:"eGFR (estimated Glomerular Filtration Rate) measures how well your kidneys filter waste from the blood per minute, corrected for body surface area. It is calculated from creatinine, age, and sex.",
+    why:"eGFR is the best overall measure of kidney function and the primary staging criterion for Chronic Kidney Disease (CKD). A healthy adult under 40 should have an eGFR above 90. eGFR naturally declines with age — approximately 1 mL/min/1.73m² per year after 40.",
+    longTerm:{ borderline:"eGFR 60–89 (Stage 2 CKD if persistent) is associated with increased cardiovascular risk even without overt symptoms. Monitoring every 6 months is recommended.", elevated:"eGFR 30–59 (Stage 3 CKD) significantly increases risk of cardiovascular events, anemia, bone disease, and electrolyte abnormalities. Specialist referral is appropriate." },
+    questions:[
+      { id:"hydration", text:"Were you well hydrated on the day of the test?", options:["Yes, well hydrated","Normal hydration","Possibly dehydrated"] },
+      { id:"trend", text:"Is this the first time eGFR has been measured, or has it been declining?", options:["First measurement","It has been stable over time","It has been trending lower","It has improved recently"] },
+      { id:"bp", text:"Do you have high blood pressure or diabetes?", options:["Yes — one of these","Yes — both","No","Not sure"] },
+    ],
+    source:"National Kidney Foundation KDIGO Guidelines, Mayo Clinic, Cleveland Clinic"
+  },
+  hemoglobin: {
+    what:"Hemoglobin is the iron-containing protein in red blood cells that carries oxygen from the lungs to tissues and returns carbon dioxide to the lungs for exhalation.",
+    why:"Hemoglobin directly determines oxygen-carrying capacity, affecting energy levels, exercise performance, and organ function. Normal ranges vary significantly with sex and altitude. At high altitude, hemoglobin naturally increases as an adaptation to lower oxygen partial pressure.",
+    longTerm:{ critical_low:"Severe anemia reduces oxygen delivery to all organs, causing heart strain, cognitive impairment, and in extreme cases, heart failure. Identifying and treating the underlying cause is essential.", borderline:"Borderline hemoglobin impairs exercise capacity, reduces cognitive function, and decreases quality of life even without frank anemia." },
+    questions:[
+      { id:"symptoms", text:"Are you experiencing fatigue, shortness of breath, or dizziness?", options:["Yes — significantly","Mild and occasional","No notable symptoms"] },
+      { id:"diet_iron", text:"How is your iron and B12 intake?", options:["I eat red meat and animal products regularly","Mostly plant-based — I may be lower in iron/B12","I supplement with iron and/or B12"] },
+      { id:"menstruation", text:"(If applicable) Do you have heavy menstrual periods?", options:["Yes — very heavy flow","Normal flow","Not applicable"] },
+    ],
+    source:"World Health Organization Anemia Guidelines, Mayo Clinic, Cleveland Clinic Hematology"
+  },
+  hematocrit: {
+    what:"Hematocrit measures the percentage of blood volume made up of red blood cells. It rises and falls in parallel with hemoglobin and is used together with it to assess anemia and polycythemia.",
+    why:"Hematocrit is particularly relevant at altitude, where the body increases red cell production to compensate for lower oxygen availability. Athletes living and training at altitude deliberately use this adaptation. Hematocrit above 50% increases blood viscosity significantly.",
+    longTerm:{ critical_high:"Chronically elevated hematocrit increases blood viscosity, elevating risk of blood clots, stroke, and heart attack — particularly dangerous if combined with dehydration.", borderline:"Low hematocrit alongside low hemoglobin confirms anemia and requires investigation of cause (iron, B12, folate, or chronic disease)." },
+    questions:[
+      { id:"altitude", text:"Have you recently traveled from low to high altitude (or vice versa)?", options:["Yes — I traveled to high altitude recently","Yes — I recently came down from high altitude","No significant change in altitude"] },
+      { id:"hydration", text:"Were you well hydrated at the time of this test?", options:["Yes, well hydrated","Normal","Possibly dehydrated — this can falsely elevate hematocrit"] },
+      { id:"training", text:"Are you engaged in endurance sport training at altitude?", options:["Yes — deliberate altitude training","No specific altitude training","I live at high altitude year-round"] },
+    ],
+    source:"World Health Organization, Mayo Clinic, International Olympic Committee Medical Commission"
+  },
+  tsh: {
+    what:"TSH (Thyroid Stimulating Hormone) is produced by the pituitary gland. It signals the thyroid to produce T4, which converts to the active hormone T3. TSH is the primary screening test for thyroid function.",
+    why:"The thyroid regulates metabolism, energy, body temperature, heart rate, and brain function. Even subtle thyroid dysfunction significantly impacts quality of life and metabolic health. The American Thyroid Association considers optimal TSH to be 0.5–2.5 mIU/L for most adults.",
+    longTerm:{ borderline:"Subclinical hypothyroidism (TSH 4.5–10) is associated with elevated cardiovascular risk, depression, cognitive decline, and fatigue. Treatment is often beneficial — evidence supports intervention when TSH > 10.", critical_low:"Hyperthyroidism accelerates heart rate, bone loss, and can cause dangerous cardiac arrhythmias if untreated.", critical_high:"Overt hypothyroidism severely impairs metabolism, raises cardiovascular risk, and causes significant cognitive and physical decline." },
+    questions:[
+      { id:"time_of_draw", text:"What time was your blood drawn for this test?", options:["Morning (before 10am)","Midday","Afternoon or evening","Not sure"] },
+      { id:"thyroid_meds", text:"Are you currently taking any thyroid medication or supplements?", options:["Yes — levothyroxine or similar","Yes — iodine or selenium supplements","No medications"] },
+      { id:"symptoms", text:"Are you experiencing any of these symptoms?", options:["Fatigue and weight gain (hypothyroid)","Anxiety, heat sensitivity, weight loss (hyperthyroid)","No notable symptoms","Multiple symptoms from both lists"] },
+    ],
+    source:"American Thyroid Association, Mayo Clinic, Cleveland Clinic Thyroid Guidelines"
+  },
+};
+
+// ─── MAYO CLINIC REFERENCE RANGES TABLE ──────────────────────────────────────
+const MAYO_RANGES = {
+  glucose:      { range:"70–99 mg/dL", notes:"100–125 = prediabetes; ≥126 = diabetes (ADA / Mayo Clinic)", sex:null },
+  hba1c:        { range:"< 5.7%", notes:"5.7–6.4% = prediabetes; ≥6.5% = diabetes (ADA / Mayo Clinic)", sex:null },
+  insulin:      { range:"< 25 µIU/mL (fasted)", notes:"Optimal target < 5 µIU/mL per functional medicine guidelines (Peter Attia)", sex:null },
+  total_chol:   { range:"< 200 mg/dL", notes:"200–239 = borderline high; ≥240 = high. <200 = desirable (NCEP / Mayo Clinic)", sex:null },
+  ldl:          { rangeM:"< 100 mg/dL (healthy); < 70 if heart disease", rangeF:"< 100 mg/dL (healthy); < 70 if heart disease", notes:"Optimal for healthy adults without CAD (Mayo Clinic / AHA)", sex:"both" },
+  hdl:          { rangeM:"> 40 mg/dL", rangeF:"> 50 mg/dL", notes:"Higher is protective. > 60 mg/dL considered cardioprotective (Mayo Clinic)", sex:"both" },
+  triglycerides:{ range:"< 150 mg/dL", notes:"150–199 = borderline high; 200–499 = high; ≥500 = very high (NCEP / Mayo Clinic)", sex:null },
+  tsh:          { range:"0.4–4.0 mIU/L", notes:"Many functional medicine physicians target 0.5–2.5 mIU/L for optimal thyroid health (American Thyroid Association)", sex:null },
+  free_t3:      { range:"2.3–4.1 pg/mL", notes:"Mayo Clinic reference. Optimal functional range often cited as 3.0–4.0 pg/mL", sex:null },
+  free_t4:      { range:"0.8–1.8 ng/dL", notes:"Mayo Clinic reference", sex:null },
+  vit_d:        { range:"20–50 ng/mL", notes:"< 20 = deficiency; < 12 = severe deficiency. Many experts target 40–60 ng/mL (Endocrine Society / Mayo Clinic)", sex:null },
+  b12:          { range:"200–900 pg/mL", notes:"Mayo Clinic reference. Functional optimum often cited as 500–900 pg/mL to reduce homocysteine", sex:null },
+  ferritin:     { rangeM:"12–300 ng/mL", rangeF:"10–150 ng/mL", notes:"Mayo Clinic reference. Functional target often 50–150 ng/mL for optimal iron stores (Peter Attia)", sex:"both" },
+  magnesium:    { range:"1.7–2.2 mg/dL", notes:"Mayo Clinic reference. Serum magnesium reflects only ~1% of total body magnesium", sex:null },
+  hscrp:        { range:"< 1.0 mg/L (low risk)", notes:"1–3 mg/L = moderate cardiovascular risk; > 3 mg/L = high risk (AHA / Mayo Clinic / JUPITER Trial)", sex:null },
+  homocysteine: { range:"< 15 µmol/L", notes:"Optimal target < 7–10 µmol/L. > 15 = hyperhomocysteinemia (Mayo Clinic)", sex:null },
+  alt:          { rangeM:"7–56 U/L", rangeF:"7–56 U/L", notes:"Cleveland Clinic recommends flagging > 25 U/L (F) and > 33 U/L (M) as functionally elevated", sex:"both" },
+  ast:          { range:"10–40 U/L", notes:"Mayo Clinic reference", sex:null },
+  creatinine:   { rangeM:"0.7–1.2 mg/dL", rangeF:"0.5–1.1 mg/dL", notes:"Mayo Clinic reference. Varies with muscle mass — athletes may run higher", sex:"both" },
+  egfr:         { range:"≥ 60 mL/min/1.73m²", notes:"≥ 90 = normal; 60–89 = mildly reduced; < 60 = CKD (National Kidney Foundation / Mayo Clinic)", sex:null },
+  hemoglobin:   { rangeM:"13.5–17.5 g/dL", rangeF:"12.0–15.5 g/dL", notes:"Mayo Clinic reference. Altitude raises normal range by ~0.5–2 g/dL", sex:"both" },
+  hematocrit:   { rangeM:"41–53%", rangeF:"36–46%", notes:"Mayo Clinic reference. Altitude increases expected values", sex:"both" },
+};
+
+function MayoRangeTable({ markerId, sex }) {
+  const data = MAYO_RANGES[markerId];
+  if (!data) return <p style={{ fontSize:12, color:"#555", margin:0 }}>See your lab report's reference range for this marker.</p>;
+
+  const isFemale = sex === "female";
+  const displayRange = data.sex === "both"
+    ? (isFemale ? data.rangeF : data.rangeM)
+    : data.range;
+  const otherRange = data.sex === "both"
+    ? (isFemale ? data.rangeM : data.rangeF)
+    : null;
+  const otherLabel = data.sex === "both"
+    ? (isFemale ? "Male reference" : "Female reference")
+    : null;
+
+  return (
+    <div>
+      <div style={{ marginBottom:8 }}>
+        <div style={{ fontSize:11, color:"#555", marginBottom:3 }}>{sex === "female" ? "Female" : sex === "male" ? "Male" : ""} reference range</div>
+        <div style={{ fontSize:16, fontWeight:500, color:"#e0e0e0", fontFamily:"monospace" }}>{displayRange}</div>
+      </div>
+      {otherRange && (
+        <div style={{ marginBottom:8, paddingTop:8, borderTop:`0.5px solid ${C.border}` }}>
+          <div style={{ fontSize:11, color:"#444", marginBottom:3 }}>{otherLabel}</div>
+          <div style={{ fontSize:13, color:"#666", fontFamily:"monospace" }}>{otherRange}</div>
+        </div>
+      )}
+      {data.notes && (
+        <div style={{ paddingTop:8, borderTop:`0.5px solid ${C.border}`, fontSize:12, color:"#555", lineHeight:1.6, fontStyle:"italic" }}>
+          {data.notes}
+        </div>
+      )}
+      <div style={{ marginTop:10, fontSize:10, color:"#333", lineHeight:1.5 }}>
+        Source: Mayo Clinic Medical Laboratories, AHA, NCEP, NLA, ADA guidelines
+      </div>
+    </div>
+  );
+}
+
+// ─── MARKER DETAIL SCREEN ─────────────────────────────────────────────────────
+function MarkerDetailScreen({ analysis, profile, onClose }) {
+  const [step, setStep]       = useState("info"); // "info" | "questions" | "result"
+  const [answers, setAnswers] = useState({});
+  const info = MARKER_INFO[analysis.id];
+  const col  = statusColor(analysis.result.status);
+  const isOptimal = ["optimal","normal"].includes(analysis.result.status);
+  const isCritical = ["critical_high","critical_low","deficient"].includes(analysis.result.status);
+
+  // Generate tailored recommendation based on answers
+  function generateRecommendation() {
+    const a = answers;
+    const lines = [];
+    const id = analysis.id;
+    const status = analysis.result.status;
+
+    // Context-adjusted interpretation
+    if (id === "glucose") {
+      if (a.fasted === "Yes, but less than 8 hours" || a.fasted === "No, I had eaten recently") {
+        lines.push("⚠️ Context note: Since you were not fully fasted, this glucose reading may not reflect true fasting glucose. Retest after a proper 10-12 hour fast for an accurate baseline.");
+      }
+      if (a.stress === "Yes, high stress/illness") {
+        lines.push("Acute stress and illness raise cortisol, which directly elevates blood glucose. Your result may be artificially elevated — retest when healthy and unstressed.");
+      }
+    }
+    if (id === "alt" || id === "ast") {
+      if (a.exercise_48h === "Yes — heavy resistance training or intense cardio") {
+        lines.push("Context note: Intense exercise commonly elevates ALT and AST from muscle breakdown, not liver damage. The effect can persist 48-72 hours post-exercise. Retest 72 hours after your last hard session for an accurate liver reading.");
+      }
+      if (a.alcohol_week === "More than 7 drinks") {
+        lines.push("Alcohol above 7 drinks per week is a significant driver of elevated liver enzymes. A 4-week alcohol-free period followed by a retest will clarify the contribution of alcohol to your results.");
+      }
+    }
+    if (id === "triglycerides") {
+      if (a.fasted === "8 hours or less" || a.fasted === "I had eaten") {
+        lines.push("Critical context: Triglycerides are extremely sensitive to recent food intake. A non-fasted sample can read 2-3x higher than true fasting levels. This result requires confirmation with a 10-12 hour fasted sample before acting on it.");
+        return lines;
+      }
+      if (a.alcohol_recent === "Yes — significant amount") {
+        lines.push("Alcohol in the 48 hours before the test significantly elevates triglycerides — often by 50-100 mg/dL. Retest after 48 hours alcohol-free for your true baseline.");
+      }
+    }
+    if (id === "creatinine") {
+      if (a.hydration === "I may have been dehydrated" || a.hydration === "I exercised heavily without enough fluid replacement") {
+        lines.push("Dehydration concentrates creatinine in the blood, producing a falsely elevated reading. Rehydrate fully and retest — drink 2L+ of water on the day of your next test.");
+      }
+    }
+    if (id === "hemoglobin" && a.menstruation === "Yes — very heavy flow") {
+      lines.push("Heavy menstrual periods are the most common cause of iron-deficiency anemia in women. Your hemoglobin result should be evaluated together with ferritin and serum iron to determine if iron supplementation is needed.");
+    }
+    if (id === "tsh" && a.time_of_draw && a.time_of_draw !== "Morning (before 10am)" && a.time_of_draw !== "Not sure") {
+      lines.push("TSH is highest in the morning and declines through the day. An afternoon draw can read 0.5-1.0 mIU/L lower than a morning draw — always test TSH in the morning for consistent tracking.");
+    }
+    if (id === "vit_d" && a.skin_tone === "Dark / deep") {
+      lines.push("Darker skin tones require significantly more UVB sun exposure to produce the same amount of Vitamin D as lighter skin — up to 6x more time in the sun. Supplementation is particularly important.");
+    }
+    if (id === "ldl" && a.fasted === "No, I had eaten") {
+      lines.push("LDL from a non-fasted sample may be slightly different from a fasted result. However, a fasted sample is preferred for the most accurate lipid panel. Retest fasted if possible.");
+    }
+
+    // Primary recommendations based on status
+    const adviceList = analysis.advice || [];
+    if (adviceList.length > 0) {
+      lines.push(...adviceList.slice(0,3));
+    }
+
+    // Escalation if still critical after context
+    const contextExplains = lines.some(l => l.includes("Context note") || l.includes("Retest") || l.includes("Rehydrate"));
+    if (isCritical && !contextExplains) {
+      lines.push("🩺 We recommend consulting with a specialist (endocrinologist, cardiologist, or your primary care physician) to evaluate this result in the context of your full medical history.");
+    } else if (isCritical && contextExplains) {
+      lines.push("If after retesting under proper conditions this marker remains in the critical range, please consult a specialist for further evaluation.");
+    }
+
+    return lines;
+  }
+
+  const recommendation = step === "result" ? generateRecommendation() : [];
+  const questions = info?.questions || [];
+  const allAnswered = questions.every(q => answers[q.id]);
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:C.bg, zIndex:100, overflowY:"auto" }}>
+      {/* Header */}
+      <div style={{ padding:"52px 20px 16px", display:"flex", alignItems:"center", gap:14, borderBottom:`1px solid ${C.border}`, background:"#0c0c0c" }}>
+        <button onClick={onClose} style={{ background:"transparent", border:"none", color:"#666", cursor:"pointer", fontSize:18, padding:0, lineHeight:1 }}>←</button>
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:12, color:"#444" }}>{CATEGORIES.find(c=>analysis.category===c.id)?.label}</div>
+          <div style={{ fontSize:20, fontWeight:500, letterSpacing:"-0.3px" }}>{analysis.name}</div>
+        </div>
+        <div style={{ textAlign:"right" }}>
+          <div style={{ fontSize:28, fontWeight:400, color:col }}>{analysis.val}</div>
+          <div style={{ fontSize:11, color:"#555" }}>{analysis.unit}</div>
+        </div>
+      </div>
+
+      <div style={{ padding:"20px 20px 100px" }}>
+
+        {/* Status badge */}
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:20, padding:"12px 16px", borderRadius:12, background:col+"10", border:`1px solid ${col}25` }}>
+          <div style={{ width:10, height:10, borderRadius:"50%", background:col, flexShrink:0 }} />
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:13, fontWeight:500, color:col }}>{STATUS_LABEL[analysis.result.status]}</div>
+            <div style={{ fontSize:11, color:"#666", marginTop:1 }}>Your value: {analysis.val} {analysis.unit}</div>
+          </div>
+        </div>
+
+        {/* Step: INFO */}
+        {step === "info" && info && (
+          <>
+            <Section title="What is it?">
+              <p style={{ fontSize:14, color:"#aaa", lineHeight:1.7, margin:0 }}>{info.what}</p>
+            </Section>
+
+            <Section title="Why does it matter?">
+              <p style={{ fontSize:14, color:"#aaa", lineHeight:1.7, margin:0 }}>{info.why}</p>
+            </Section>
+
+            {info.longTerm && info.longTerm[analysis.result.status] && (
+              <Section title="Long-term implications">
+                <p style={{ fontSize:14, color:"#aaa", lineHeight:1.7, margin:0 }}>{info.longTerm[analysis.result.status]}</p>
+              </Section>
+            )}
+
+            <Section title="Reference ranges (Mayo Clinic)">
+              <MayoRangeTable markerId={analysis.id} sex={profile.sex} />
+            </Section>
+
+            <Section title="Source">
+              <p style={{ fontSize:12, color:"#555", lineHeight:1.6, margin:0, fontStyle:"italic" }}>{info.source}</p>
+              <div style={{ marginTop:10, padding:"8px 10px", background:"#0a0a0a", borderRadius:8, fontSize:11, color:"#444", lineHeight:1.6 }}>
+                ⚠️ Reference ranges reflect where 95% of healthy people fall — 5% of healthy individuals will have results outside the range without any underlying condition. These are population averages; personalized ranges accounting for your age, sex, altitude, and lifestyle are more meaningful for tracking your health over time.
+              </div>
+            </Section>
+
+            {isOptimal ? (
+              <div style={{ background:C.teal+"10", border:`1px solid ${C.teal}25`, borderRadius:14, padding:"14px 16px" }}>
+                <div style={{ fontSize:13, fontWeight:500, color:C.teal, marginBottom:6 }}>Looking great</div>
+                {analysis.advice.slice(0,2).map((tip,i) => <div key={i} style={{ fontSize:13, color:"#888", lineHeight:1.6 }}>{tip}</div>)}
+              </div>
+            ) : (
+              <button onClick={()=>setStep("questions")}
+                style={{ width:"100%", padding:"13px 0", borderRadius:14, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:14, fontWeight:500 }}>
+                Get personalized recommendations →
+              </button>
+            )}
+          </>
+        )}
+
+        {/* Step: QUESTIONS */}
+        {step === "questions" && (
+          <>
+            <div style={{ fontSize:14, color:"#666", marginBottom:20, lineHeight:1.6 }}>
+              To give you accurate, context-aware recommendations, answer a few quick questions about this test.
+            </div>
+            {questions.map(q => (
+              <div key={q.id} style={{ marginBottom:20 }}>
+                <div style={{ fontSize:14, fontWeight:500, color:"#ccc", marginBottom:10, lineHeight:1.5 }}>{q.text}</div>
+                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  {q.options.map(opt => (
+                    <button key={opt} onClick={()=>setAnswers(a=>({...a,[q.id]:opt}))}
+                      style={{ padding:"10px 14px", borderRadius:10, border:`1px solid ${answers[q.id]===opt?C.teal:C.border}`, background:answers[q.id]===opt?C.teal+"15":"transparent", color:answers[q.id]===opt?C.teal:"#888", cursor:"pointer", fontSize:13, textAlign:"left" }}>
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <button onClick={()=>setStep("result")} disabled={!allAnswered}
+              style={{ width:"100%", padding:"13px 0", borderRadius:14, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:14, fontWeight:500, opacity:allAnswered?1:0.4 }}>
+              See my recommendations →
+            </button>
+          </>
+        )}
+
+        {/* Step: RESULT */}
+        {step === "result" && (
+          <>
+            <Section title="Your personalized recommendations">
+              <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                {recommendation.map((tip,i) => (
+                  <div key={i} style={{ fontSize:13, color:"#aaa", lineHeight:1.7, padding:"10px 14px", background:"#111", borderRadius:10, border:`1px solid ${C.border}` }}>
+                    {tip}
+                  </div>
+                ))}
+              </div>
+            </Section>
+
+            {info?.source && (
+              <div style={{ marginTop:16, padding:"10px 14px", borderRadius:10, background:"#0a0a0a", border:`1px solid ${C.border}` }}>
+                <div style={{ fontSize:11, color:"#444", fontStyle:"italic" }}>Based on: {info.source}</div>
+              </div>
+            )}
+
+            <button onClick={()=>setStep("questions")} style={{ width:"100%", marginTop:16, padding:"11px 0", borderRadius:12, background:"transparent", border:`1px solid ${C.border}`, color:"#666", cursor:"pointer", fontSize:13 }}>
+              ← Revise answers
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div style={{ marginBottom:20 }}>
+      <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8 }}>{title}</div>
+      <div style={{ background:C.card, borderRadius:14, border:`1px solid ${C.border}`, padding:"14px 16px" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─── IMPORT MODAL ─────────────────────────────────────────────────────────────
+// ─── IMPORT MODAL ─────────────────────────────────────────────────────────────
+function ImportModal({ state, onToggle, onApply, onAnalyzeText, onClose }) {
+  const { status, progress, detected, imageUrl, error } = state;
+  const found    = detected.filter(d => d.value !== null);
+  const notFound = detected.filter(d => d.value === null);
+  const [pasteText, setPasteText] = useState("");
+
+  const subtitle =
+    status === "loading" ? progress || "Processing…"
+    : status === "done" ? `Detected ${found.length} of ${detected.length} markers`
+    : status === "image_only" ? "Image loaded — enter values manually"
+    : status === "paste" ? "Paste your lab report text below"
+    : status === "error" ? "Could not read file"
+    : "Preparing…";
+
+  return (
+    <div style={{ position:"fixed", inset:0, zIndex:50, display:"flex", alignItems:"center", justifyContent:"center", padding:16, background:"rgba(0,0,0,0.85)" }}>
+      <div style={{ background:"#111", borderRadius:20, border:`1px solid ${C.border}`, width:"100%", maxWidth:440, maxHeight:"90vh", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+        <div style={{ padding:"16px 20px", borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div>
+            <div style={{ fontSize:15, fontWeight:500 }}>Import lab report</div>
+            <div style={{ fontSize:12, color:"#555", marginTop:2 }}>{subtitle}</div>
+          </div>
+          <button onClick={onClose} style={{ width:28, height:28, borderRadius:"50%", background:"#1a1a1a", border:"none", color:"#666", cursor:"pointer", fontSize:14 }}>✕</button>
+        </div>
+        <div style={{ overflowY:"auto", flex:1, padding:20 }}>
+          {status === "loading" && (
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", padding:"40px 0", gap:16 }}>
+              <div style={{ width:48, height:48, borderRadius:"50%", border:`3px solid ${C.border}`, borderTopColor:C.teal, animation:"spin 1s linear infinite" }} />
+              <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+              <div style={{ fontSize:13, color:"#666", textAlign:"center" }}>{progress || "Analyzing your lab report…"}</div>
+            </div>
+          )}
+          {status === "error" && (
+            <div style={{ background:"#FF453A15", border:`1px solid #FF453A30`, borderRadius:12, padding:"12px 14px", fontSize:13, color:C.red }}>
+              <div style={{ fontWeight:500, marginBottom:4 }}>Could not read file</div>
+              <div style={{ color:"#FF453A99" }}>{error}</div>
+            </div>
+          )}
+          {status === "image_only" && imageUrl && (
+            <div>
+              <div style={{ background:"#F5830015", border:`1px solid #F5830030`, borderRadius:12, padding:"10px 12px", fontSize:12, color:C.orange, marginBottom:12 }}>
+                {error}
+              </div>
+              <img src={imageUrl} alt="Lab report" style={{ width:"100%", borderRadius:12 }} />
+            </div>
+          )}
+          {status === "done" && (
+            <div>
+              {found.length > 0 && (
+                <>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                    <div style={{ fontSize:13, fontWeight:500 }}>Detected values <span style={{ color:"#444" }}>({found.length})</span></div>
+                    <div style={{ display:"flex", gap:12, fontSize:12 }}>
+                      <button onClick={() => onToggle("all",true)} style={{ color:C.teal, background:"none", border:"none", cursor:"pointer", padding:0 }}>All</button>
+                      <button onClick={() => onToggle("all",false)} style={{ color:"#444", background:"none", border:"none", cursor:"pointer", padding:0 }}>None</button>
+                    </div>
+                  </div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom:16 }}>
+                    {found.map(d => (
+                      <label key={d.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 12px", borderRadius:10, border:`1px solid ${d.checked ? C.teal+"40":"#1e1e1e"}`, background:d.checked ? C.teal+"08":"transparent", cursor:"pointer" }}>
+                        <input type="checkbox" checked={d.checked} onChange={e => onToggle(d.id, e.target.checked)} style={{ accentColor:C.teal }} />
+                        <span style={{ flex:1, fontSize:13 }}>{d.name}</span>
+                        <span style={{ fontSize:13, fontWeight:500, color:C.teal }}>{d.value} <span style={{ fontSize:11, color:"#444" }}>{d.unit}</span></span>
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+              {found.length === 0 && (
+                <div style={{ background:"#F5830015", border:`1px solid #F5830030`, borderRadius:12, padding:"12px 14px", fontSize:13, color:C.orange }}>
+                  No values detected. Try the paste method — open your PDF, Ctrl+A, Ctrl+C, then paste.
+                </div>
+              )}
+              {notFound.length > 0 && (
+                <details style={{ marginTop:8 }}>
+                  <summary style={{ fontSize:12, color:"#444", cursor:"pointer" }}>Not detected ({notFound.length})</summary>
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginTop:8 }}>
+                    {notFound.map(d => <span key={d.id} style={{ fontSize:11, color:"#444", background:"#1a1a1a", borderRadius:6, padding:"2px 8px" }}>{d.name}</span>)}
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
+          {status === "paste" && (
+            <div>
+              <p style={{ fontSize:12, color:"#555", marginBottom:12, lineHeight:1.6 }}>
+                Open your PDF, press <strong style={{ color:"#888" }}>Ctrl+A</strong> then <strong style={{ color:"#888" }}>Ctrl+C</strong>, paste below. Works with Spanish and English lab reports.
+              </p>
+              <textarea
+                style={{ width:"100%", height:200, background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:10, padding:12, fontSize:12, color:"#ccc", fontFamily:"monospace", resize:"none" }}
+                placeholder="Paste your lab report text here…"
+                value={pasteText}
+                onChange={e => setPasteText(e.target.value)}
+              />
+            </div>
+          )}
+        </div>
+        <div style={{ padding:"12px 20px", borderTop:`1px solid ${C.border}`, display:"flex", gap:8 }}>
+          <button onClick={onClose} style={{ flex:1, padding:"10px 0", borderRadius:10, background:"transparent", border:`1px solid ${C.border}`, color:"#666", cursor:"pointer", fontSize:13 }}>Cancel</button>
+          {status === "paste" && (
+            <button
+              onClick={() => {
+                if (pasteText.trim()) {
+                  const parsed = parseLabText(pasteText);
+                  const detected = LAB_PATTERNS.map(p=>({ id:p.id, name:p.name, unit:p.unit, value:parsed[p.id]??null, checked:!!parsed[p.id] }));
+                  onAnalyzeText(detected);
+                  setPasteText("");
+                }
+              }}
+              style={{ flex:1, padding:"10px 0", borderRadius:10, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:13, fontWeight:500 }}
+            >Analyze</button>
+          )}
+          {status === "done" && found.filter(d=>d.checked).length > 0 && (
+            <button onClick={onApply} style={{ flex:1, padding:"10px 0", borderRadius:10, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:13, fontWeight:500 }}>
+              Apply {found.filter(d=>d.checked).length} values
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+function LoginScreen() {
+  const [email, setEmail]       = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError]       = useState("");
+  const [loading, setLoading]   = useState(false);
+  const [mode, setMode]         = useState("signin");
+  const [resetSent, setResetSent] = useState(false);
+
+  const cleanErr = msg => {
+    if (msg.includes("Invalid login credentials")) return "Incorrect email or password.";
+    if (msg.includes("User already registered"))   return "An account with this email already exists.";
+    if (msg.includes("Password should be"))        return "Password must be at least 6 characters.";
+    return msg;
+  };
+
+  const handleEmail = async () => {
+    if (!email || !password) return;
+    setLoading(true); setError("");
+    const fn = mode === "signup"
+      ? sbClient.auth.signUp({ email, password })
+      : sbClient.auth.signInWithPassword({ email, password });
+    const { error:e } = await fn;
+    if (e) { setError(cleanErr(e.message)); setLoading(false); }
+  };
+
+  const handleGoogle = async () => {
+    setLoading(true); setError("");
+    const { error:e } = await sbClient.auth.signInWithOAuth({ provider:"google", options:{ redirectTo:window.location.origin, skipBrowserRedirect:false } });
+    if (e) { setError(cleanErr(e.message)); setLoading(false); }
+  };
+
+  const handleReset = async () => {
+    if (!email) { setError("Enter your email first."); return; }
+    setLoading(true); setError("");
+    const { error:e } = await sbClient.auth.resetPasswordForEmail(email, { redirectTo:window.location.origin });
+    setLoading(false);
+    if (e) setError(cleanErr(e.message)); else setResetSent(true);
+  };
+
+  return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:16, background:C.bg }}>
+      <div style={{ width:"100%", maxWidth:360 }}>
+        <div style={{ textAlign:"center", marginBottom:40 }}>
+          <div style={{ width:56, height:56, borderRadius:16, background:C.teal+"18", border:`1px solid ${C.teal}30`, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:24 }}>◎</div>
+          <div style={{ fontSize:26, fontWeight:500, letterSpacing:"-0.5px" }}>Innermark</div>
+          <div style={{ fontSize:13, color:"#444", marginTop:6 }}>Know your body from the inside</div>
+        </div>
+        <div style={{ background:C.card, borderRadius:20, border:`1px solid ${C.border}`, padding:24 }}>
+          {resetSent ? (
+            <div style={{ textAlign:"center", padding:"16px 0" }}>
+              <div style={{ fontSize:32, marginBottom:12 }}>✉</div>
+              <div style={{ fontWeight:500, marginBottom:8 }}>Check your inbox</div>
+              <div style={{ fontSize:13, color:"#555", marginBottom:16 }}>Sent reset link to <span style={{ color:"#888" }}>{email}</span></div>
+              <button onClick={() => setResetSent(false)} style={{ color:C.teal, background:"none", border:"none", cursor:"pointer", fontSize:13 }}>Back to sign in</button>
+            </div>
+          ) : (
+            <>
+              <button onClick={handleGoogle} disabled={loading} style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"center", gap:10, padding:"11px 0", borderRadius:12, background:"transparent", border:`1px solid ${C.border}`, color:"#ccc", cursor:"pointer", fontSize:14, marginBottom:16 }}>
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                  <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908C16.658 14.013 17.64 11.706 17.64 9.2z"/>
+                  <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/>
+                  <path fill="#FBBC05" d="M3.964 10.71c-.18-.54-.282-1.117-.282-1.71s.102-1.17.282-1.71V4.958H.957C.347 6.173 0 7.548 0 9s.348 2.827.957 4.042l3.007-2.332z"/>
+                  <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/>
+                </svg>
+                Continue with Google
+              </button>
+              <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
+                <div style={{ flex:1, height:"0.5px", background:C.border }} />
+                <span style={{ fontSize:11, color:"#333" }}>or email</span>
+                <div style={{ flex:1, height:"0.5px", background:C.border }} />
+              </div>
+              <div style={{ display:"flex", gap:4, background:"#0a0a0a", borderRadius:10, padding:4, marginBottom:16 }}>
+                {[["signin","Sign in"],["signup","Sign up"]].map(([m,l]) => (
+                  <button key={m} onClick={() => { setMode(m); setError(""); }} style={{ flex:1, padding:"7px 0", borderRadius:8, border:"none", background:mode===m?"#1a1a1a":"transparent", color:mode===m?"#fff":"#444", cursor:"pointer", fontSize:13 }}>{l}</button>
+                ))}
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                <input type="email" placeholder="Email address" value={email} onChange={e=>setEmail(e.target.value)}
+                  style={{ width:"100%", padding:"11px 14px", borderRadius:10, background:"#0a0a0a", border:`1px solid ${C.border}`, color:"#fff", fontSize:14 }} />
+                <input type="password" placeholder="Password (min 6 chars)" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleEmail()}
+                  style={{ width:"100%", padding:"11px 14px", borderRadius:10, background:"#0a0a0a", border:`1px solid ${C.border}`, color:"#fff", fontSize:14 }} />
+              </div>
+              {error && <div style={{ marginTop:10, padding:"8px 12px", borderRadius:8, background:"#FF453A15", color:C.red, fontSize:12 }}>{error}</div>}
+              <button onClick={handleEmail} disabled={loading||!email||!password}
+                style={{ width:"100%", marginTop:14, padding:"11px 0", borderRadius:12, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:14, fontWeight:500, opacity:(!email||!password||loading)?0.4:1 }}>
+                {loading ? "Loading…" : mode==="signin" ? "Sign in" : "Create account"}
+              </button>
+              {mode==="signin" && (
+                <button onClick={handleReset} style={{ width:"100%", marginTop:10, color:"#333", background:"none", border:"none", cursor:"pointer", fontSize:12 }}>Forgot password?</button>
+              )}
+            </>
+          )}
+        </div>
+        <div style={{ textAlign:"center", fontSize:11, color:"#333", marginTop:16 }}>Your data is private and only accessible to you</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function Innermark() {
+  const [profile, setProfile] = useState({
+    sex:"male", birthDate:"", height:"", weight:"",
+    bloodType:"", city:"", exerciseHours:0, dietType:"balanced",
+    altitudeM:0, altitudeSource:"standard", resolvedCity:""
+  });
+  const [sessions, setSessions]           = useState([]);
+  const [currentValues, setCurrentValues] = useState({});
+  const [currentDate, setCurrentDate]     = useState(new Date().toISOString().split("T")[0]);
+  const [currentLabel, setCurrentLabel]   = useState("");
+  const [mainTab, setMainTab]             = useState("dashboard");
+  const [activeCategory, setActiveCategory] = useState("metabolic");
+  const [trendMarkerId, setTrendMarkerId] = useState("glucose");
+  const [saveMsg, setSaveMsg]             = useState("");
+  const [cloudSyncing, setCloudSyncing]   = useState(false);
+  const [user, setUser]                   = useState(null);
+  const [authLoading, setAuthLoading]     = useState(true);
+  const [importState, setImportState]     = useState({ open:false, status:"idle", progress:"", detected:[], imageUrl:null, error:null });
+  const [showTestForm, setShowTestForm]   = useState(false);
+  const [altitudeLoading, setAltitudeLoading] = useState(false);
+  const [selectedMarker, setSelectedMarker]     = useState(null);
+  const [cityInput, setCityInput]         = useState("");
+
+  const fileInputRef = useRef(null);
+
+  const age        = useMemo(() => calcAge(profile.birthDate), [profile.birthDate]);
+  const fullProfile = useMemo(() => ({ ...profile, age }), [profile, age]);
+  const markers    = useMemo(() => buildMarkers(fullProfile), [fullProfile]);
+  const currentMarkers = useMemo(() => markers.filter(m=>m.category===activeCategory), [markers, activeCategory]);
+  const analyses   = useMemo(() => computeAnalyses(markers, currentValues), [markers, currentValues]);
+  const score      = useMemo(() => computeScore(analyses), [analyses]);
+  const needsAction = useMemo(() => analyses.filter(a=>!["optimal","normal"].includes(a.result.status)).sort((a,b)=>PRIORITY.indexOf(a.result.status)-PRIORITY.indexOf(b.result.status)), [analyses]);
+  const lookingGood = useMemo(() => analyses.filter(a=>["optimal","normal"].includes(a.result.status)), [analyses]);
+  const trendMarker = useMemo(() => markers.find(m=>m.id===trendMarkerId), [markers, trendMarkerId]);
+  const allMarkersWithData = useMemo(() => markers.filter(m=>sessions.some(s=>s.values[m.id])), [markers, sessions]);
+
+  // Auth
+  useEffect(() => {
+    const initAuth = async () => {
+      await new Promise(r => setTimeout(r, 300));
+      const { data:{ session } } = await sbClient.auth.getSession();
+      if (session?.user) { setUser(session.user); loadUserData(session.user.id); }
+      else setAuthLoading(false);
+    };
+    initAuth();
+    const { data:{ subscription } } = sbClient.auth.onAuthStateChange(async (event, session) => {
+      if (session?.user) {
+        setUser(session.user);
+        if (event==="SIGNED_IN") loadUserData(session.user.id);
+      } else {
+        setUser(null);
+        setProfile({ sex:"male", birthDate:"", height:"", weight:"", bloodType:"", city:"", exerciseHours:0, dietType:"balanced", altitudeM:0, altitudeSource:"standard", resolvedCity:"" });
+        setSessions([]); setCurrentValues({}); setAuthLoading(false);
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Geolocation runs only once, inside loadUserData, if no saved altitude
+
+  const loadUserData = async (userId) => {
+    try {
+      const { data:pd } = await sbClient.from("profiles").select("*").eq("id",userId).single();
+      const savedAlt = pd?.altitude_m || 0;
+      const savedAltSource = pd?.altitude_source || "standard";
+      if (pd) {
+        setProfile({
+          sex: pd.sex||"male", birthDate: pd.birth_date||"",
+          height: pd.height||"", weight: pd.weight||"",
+          bloodType: pd.blood_type||"", city: pd.city||"",
+          exerciseHours: pd.exercise_hours||0, dietType: pd.diet_type||"balanced",
+          altitudeM: savedAlt, altitudeSource: savedAltSource,
+          resolvedCity: pd.city||""
+        });
+        setCityInput(pd.city||"");
+      }
+      // Only request geolocation if user has no saved altitude yet
+      if (!savedAlt && navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(async pos => {
+          const alt = await getAltitudeFromCoords(pos.coords.latitude, pos.coords.longitude);
+          setProfile(p => ({ ...p, altitudeM: Math.round(alt), altitudeSource:"gps" }));
+        }, () => {});
+      }
+      const { data:sd } = await sbClient.from("lab_sessions").select("*").eq("user_id",userId).order("date",{ascending:true});
+      if (sd?.length) setSessions(sd.map(s=>({ id:s.id, date:s.date, label:s.label, values:s.values })));
+    } catch(e) { console.error(e); }
+    finally { setAuthLoading(false); }
+  };
+
+  // Sync profile
+  useEffect(() => {
+    if (!user) return;
+    const t = setTimeout(async () => {
+      try {
+        await sbClient.from("profiles").upsert({
+          id: user.id, sex: profile.sex, birth_date: profile.birthDate||null,
+          height: profile.height||null, weight: profile.weight||null,
+          blood_type: profile.bloodType||null, city: profile.city||null,
+          exercise_hours: profile.exerciseHours||0, diet_type: profile.dietType||"balanced",
+          altitude_m: profile.altitudeM||0, altitude_source: profile.altitudeSource||"standard"
+        });
+      } catch(e) { console.error(e); }
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [profile, user]);
+
+  const handleCitySearch = async () => {
+    if (!cityInput.trim()) return;
+    setAltitudeLoading(true);
+    const result = await getAltitudeFromCity(cityInput.trim());
+    setAltitudeLoading(false);
+    if (result) {
+      setProfile(p => ({ ...p, city: cityInput.trim(), resolvedCity: result.cityName, altitudeM: result.altitude, altitudeSource:"city" }));
+    } else {
+      setProfile(p => ({ ...p, city: cityInput.trim() }));
+    }
+  };
+
+  // Import handlers
+  const handleFileChosen = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    const isImage = file.type.startsWith("image/");
+    const isPDF = file.type==="application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    if (!isImage && !isPDF) { setImportState({ open:true, status:"error", progress:"", detected:[], imageUrl:null, error:"Unsupported file type." }); return; }
+    const imageUrl = isImage ? URL.createObjectURL(file) : null;
+    setImportState({ open:true, status:"loading", progress:"Preparing…", detected:[], imageUrl, error:null });
+    try {
+      let text = "";
+      if (isPDF) text = await extractPDFText(file, p => setImportState(s=>({...s,progress:p})));
+      else throw new Error("Automatic image recognition not available. Refer to the image while entering values manually.");
+      const parsed = parseLabText(text);
+      const detected = LAB_PATTERNS.map(p=>({ id:p.id, name:p.name, unit:p.unit, value:parsed[p.id]??null, checked:!!parsed[p.id] }));
+      setImportState(s=>({...s, status:"done", detected, progress:""}));
+    } catch(err) {
+      if (isImage && imageUrl) setImportState(s=>({...s, status:"image_only", error:err.message}));
+      else setImportState(s=>({...s, status:"error", error:err.message}));
+    }
+  };
+
+  const handleToggle = (id, checked) => {
+    setImportState(s=>({ ...s, detected:id==="all" ? s.detected.map(d=>({...d,checked:d.value!==null?checked:false})) : s.detected.map(d=>d.id===id?{...d,checked}:d) }));
+  };
+
+  const applyImport = () => {
+    const toApply = importState.detected.filter(d=>d.checked&&d.value!==null);
+    setCurrentValues(prev=>{ const next={...prev}; toApply.forEach(d=>{next[d.id]=d.value;}); return next; });
+    setImportState(s=>({...s,open:false}));
+    setShowTestForm(true); setMainTab("tests");
+  };
+
+  const saveTest = async () => {
+    if (!Object.values(currentValues).some(v=>v!=="")) return;
+    setCloudSyncing(true);
+    try {
+      if (user) {
+        const { data, error } = await sbClient.from("lab_sessions").insert({ user_id:user.id, label:currentLabel.trim()||fmtDate(currentDate), date:currentDate, values:currentValues }).select().single();
+        if (error) throw error;
+        setSessions(prev=>[...prev,{id:data.id,date:data.date,label:data.label,values:data.values}].sort((a,b)=>a.date.localeCompare(b.date)));
+      }
+      setSaveMsg("Saved"); setCurrentLabel("");
+      setTimeout(()=>setSaveMsg(""),2500);
+      setShowTestForm(false);
+    } catch(e) { console.error(e); setSaveMsg("Save failed"); setTimeout(()=>setSaveMsg(""),3000); }
+    finally { setCloudSyncing(false); }
+  };
+
+  const deleteSession = async (id) => {
+    setSessions(prev=>prev.filter(x=>x.id!==id));
+    if (user) { try { await sbClient.from("lab_sessions").delete().eq("id",id).eq("user_id",user.id); } catch(e){} }
+  };
+
+  if (authLoading) return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:C.bg }}>
+      <div style={{ width:36, height:36, borderRadius:"50%", border:`3px solid #1a1a1a`, borderTopColor:C.teal, animation:"spin 1s linear infinite" }} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+  if (!user) return <LoginScreen />;
+
+  const initials = (user.email||"U")[0].toUpperCase();
+
+  // ── DASHBOARD ────────────────────────────────────────────────────────────────
+  const DashboardTab = () => {
+    const lastSession = sessions.length > 0 ? sessions[sessions.length-1] : null;
+    const dashAnalyses = lastSession ? computeAnalyses(markers, lastSession.values) : analyses;
+    const dashScore    = lastSession ? computeScore(dashAnalyses) : score;
+    const dashNeeds    = dashAnalyses.filter(a=>!["optimal","normal"].includes(a.result.status)).sort((a,b)=>PRIORITY.indexOf(a.result.status)-PRIORITY.indexOf(b.result.status));
+    const dashGood     = dashAnalyses.filter(a=>["optimal","normal"].includes(a.result.status));
+
+    if (dashAnalyses.length === 0) return (
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"60px 24px", textAlign:"center" }}>
+        <div style={{ width:64, height:64, borderRadius:20, background:C.teal+"12", border:`1px solid ${C.teal}20`, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:20, fontSize:28 }}>◎</div>
+        <div style={{ fontSize:18, fontWeight:500, marginBottom:8 }}>No tests yet</div>
+        <div style={{ fontSize:14, color:"#444", marginBottom:28, lineHeight:1.6 }}>Import your first lab report to see your health dashboard</div>
+        <button onClick={()=>{ setShowTestForm(true); setMainTab("tests"); }}
+          style={{ padding:"12px 28px", borderRadius:12, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:14, fontWeight:500 }}>
+          Add first test
+        </button>
+      </div>
+    );
+
+    return (
+      <div style={{ paddingBottom:100 }}>
+        {lastSession && <div style={{ fontSize:11, color:"#333", marginBottom:10 }}>Last test: {fmtDate(lastSession.date)}</div>}
+
+        <ScoreCard
+          score={dashScore}
+          total={dashAnalyses.length}
+          attention={dashNeeds.length}
+          optimal={dashGood.length}
+        />
+
+        {dashAnalyses.length > 0 && (
+          <>
+            <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8, marginTop:16 }}>Key markers</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:16 }}>
+              {dashAnalyses.slice(0,6).map(a => {
+                const col = statusColor(a.result.status);
+                const range = a.normalRange || a.optimalRange || [0,100];
+                const pct = range[1] < 900 ? Math.min(((a.val-range[0])/(range[1]-range[0]))*100,100) : Math.min((a.val/200)*100,100);
+                const bgGrad = a.result.status === "optimal" || a.result.status === "normal"
+                  ? "linear-gradient(135deg,#0a2020 0%,#080f0f 60%,#080808 100%)"
+                  : a.result.status === "critical_high" || a.result.status === "critical_low" || a.result.status === "deficient"
+                  ? "linear-gradient(135deg,#200808 0%,#120404 60%,#080808 100%)"
+                  : "linear-gradient(135deg,#1e0e00 0%,#100800 60%,#080808 100%)";
+                return (
+                  <div key={a.id} onClick={()=>setSelectedMarker(a)} style={{ borderRadius:16, border:`1px solid ${col}25`, padding:"14px 14px", background:bgGrad, cursor:"pointer" }}>
+                    <div style={{ fontSize:10, color:"#888", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>{a.name}</div>
+                    <div style={{ fontSize:26, fontWeight:400, lineHeight:1 }}>{a.val} <span style={{ fontSize:10, color:"#555" }}>{a.unit}</span></div>
+                    <Badge status={a.result.status} />
+                    <div style={{ height:3, background:"#1a1a1a", borderRadius:2, marginTop:10, overflow:"hidden" }}>
+                      <div style={{ height:"100%", width:`${Math.max(pct,5)}%`, background:col, borderRadius:2 }} />
+                    </div>
+                    <div style={{ fontSize:10, color:"#333", marginTop:8, textAlign:"right" }}>tap for details →</div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {dashNeeds.length > 0 && (
+          <>
+            <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8 }}>Action items</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {dashNeeds.slice(0,5).map(a => {
+                const col = statusColor(a.result.status);
+                return (
+                  <div key={a.id} onClick={()=>setSelectedMarker(a)} style={{ background:C.card, borderRadius:14, border:`1px solid ${C.border}`, padding:"12px 14px", display:"flex", alignItems:"flex-start", gap:12, cursor:"pointer" }}>
+                    <div style={{ width:8, height:8, borderRadius:"50%", background:col, flexShrink:0, marginTop:3 }} />
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:13, fontWeight:500, color:"#e0e0e0" }}>{a.name}</div>
+                      {a.advice.slice(0,2).map((tip,i) => (
+                        <div key={i} style={{ fontSize:11, color:"#666", marginTop:2, lineHeight:1.5 }}>{tip}</div>
+                      ))}
+                    </div>
+                    <Badge status={a.result.status} />
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {dashGood.length > 0 && (
+          <>
+            <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8, marginTop:16 }}>Looking good</div>
+            <div style={{ background:C.card, borderRadius:14, border:`1px solid ${C.border}`, padding:"12px 14px" }}>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                {dashGood.map(a => (
+                  <span key={a.id} style={{ fontSize:11, padding:"4px 10px", borderRadius:20, background:C.teal+"12", color:C.teal }}>{a.name}</span>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+
+        {profile.altitudeM > 0 && (
+          <div style={{ marginTop:12, padding:"8px 12px", borderRadius:10, background:"#12BFBF08", border:`1px solid ${C.teal}15`, fontSize:11, color:"#555" }}>
+            Ranges personalized for {profile.resolvedCity || profile.city || "your location"} at {profile.altitudeM}m altitude
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── TRENDS ───────────────────────────────────────────────────────────────────
+  const TrendsTab = () => (
+    <div style={{ paddingBottom:100 }}>
+      {sessions.length === 0 ? (
+        <div style={{ textAlign:"center", padding:"60px 24px", color:"#333" }}>
+          <div style={{ fontSize:16, fontWeight:500, color:"#fff", marginBottom:8 }}>No data yet</div>
+          <div style={{ fontSize:13 }}>Save tests to track trends over time</div>
+        </div>
+      ) : (
+        <>
+          <div style={{ background:C.card, borderRadius:16, border:`1px solid ${C.border}`, padding:"14px 16px", marginBottom:10 }}>
+            <select value={trendMarkerId} onChange={e=>setTrendMarkerId(e.target.value)}
+              style={{ width:"100%", background:"transparent", border:"none", color:"#fff", fontSize:14, cursor:"pointer" }}>
+              {CATEGORIES.map(cat => (
+                <optgroup key={cat.id} label={cat.label}>
+                  {markers.filter(m=>m.category===cat.id).map(m => (
+                    <option key={m.id} value={m.id} style={{ background:"#1a1a1a" }}>{m.name} ({m.unit})</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </div>
+          {trendMarker && (
+            <div style={{ background:C.card, borderRadius:16, border:`1px solid ${C.border}`, padding:"16px", marginBottom:10 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+                <div style={{ fontSize:15, fontWeight:500 }}>{trendMarker.name}</div>
+                <div style={{ fontSize:11, color:"#444" }}>{trendMarker.unit}</div>
+              </div>
+              <TrendChart marker={trendMarker} sessions={sessions} />
+            </div>
+          )}
+          {allMarkersWithData.length > 1 && (
+            <>
+              <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8, marginTop:16 }}>All tracked markers</div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                {allMarkersWithData.filter(m=>m.id!==trendMarkerId).map(m => (
+                  <button key={m.id} onClick={()=>setTrendMarkerId(m.id)}
+                    style={{ background:C.card, borderRadius:14, border:`1px solid ${C.border}`, padding:"12px", textAlign:"left", cursor:"pointer" }}>
+                    <div style={{ fontSize:11, color:"#666", marginBottom:8 }}>{m.name}</div>
+                    <TrendChart marker={m} sessions={sessions} />
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  // ── TESTS ────────────────────────────────────────────────────────────────────
+  const TestsTab = () => (
+    <div style={{ paddingBottom:100 }}>
+      {!showTestForm ? (
+        <>
+          <button onClick={()=>setShowTestForm(true)} style={{ width:"100%", padding:"13px 0", borderRadius:14, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:14, fontWeight:500, marginBottom:16 }}>
+            + New test
+          </button>
+          {sessions.length === 0 ? (
+            <div style={{ textAlign:"center", padding:"40px 0", color:"#555", fontSize:14 }}>No tests saved yet</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {[...sessions].reverse().map(s => {
+                const sA = computeAnalyses(markers, s.values);
+                const sS = computeScore(sA);
+                const sc = scoreColor(sS);
+                return (
+                  <div key={s.id} style={{ background:C.card, borderRadius:14, border:`1px solid ${C.border}`, padding:"14px 16px" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                      <div>
+                        <div style={{ fontSize:14, fontWeight:500 }}>{s.label}</div>
+                        <div style={{ fontSize:11, color:"#555", marginTop:2 }}>{fmtDate(s.date)}</div>
+                      </div>
+                      {sS && <div style={{ fontSize:22, fontWeight:400, color:sc }}>{sS}</div>}
+                    </div>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <button onClick={()=>{ setCurrentValues({...s.values}); setCurrentDate(s.date); setShowTestForm(true); }}
+                        style={{ flex:1, padding:"8px 0", borderRadius:8, background:"transparent", border:`1px solid ${C.teal}40`, color:C.teal, cursor:"pointer", fontSize:12 }}>Load</button>
+                      <button onClick={()=>deleteSession(s.id)}
+                        style={{ padding:"8px 14px", borderRadius:8, background:"transparent", border:`1px solid ${C.border}`, color:"#555", cursor:"pointer", fontSize:12 }}>✕</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
+            <button onClick={()=>setShowTestForm(false)} style={{ background:"transparent", border:"none", color:"#666", cursor:"pointer", fontSize:16, padding:0 }}>←</button>
+            <div style={{ fontSize:16, fontWeight:500 }}>New test</div>
+          </div>
+
+          <div style={{ display:"flex", overflowX:"auto", gap:6, marginBottom:14, paddingBottom:4 }}>
+            {CATEGORIES.map(cat => {
+              const catHasIssue = markers.filter(m=>m.category===cat.id).some(m=>{ const raw=currentValues[m.id]; if(!raw) return false; const v=parseFloat(raw); if(isNaN(v)) return false; return !["optimal","normal"].includes(m.evaluate(v).status); });
+              const catHasAny = markers.filter(m=>m.category===cat.id).some(m=>currentValues[m.id]);
+              return (
+                <button key={cat.id} onClick={()=>setActiveCategory(cat.id)} style={{ padding:"6px 14px", borderRadius:20, border:`1px solid ${activeCategory===cat.id?C.teal:C.border}`, background:activeCategory===cat.id?C.teal+"15":"transparent", color:activeCategory===cat.id?C.teal:"#666", cursor:"pointer", fontSize:12, whiteSpace:"nowrap", position:"relative" }}>
+                  {cat.label}
+                  {catHasAny && <span style={{ position:"absolute", top:-2, right:-2, width:6, height:6, borderRadius:"50%", background:catHasIssue?C.orange:C.teal, border:`1px solid ${C.bg}` }} />}
+                </button>
+              );
+            })}
+          </div>
+
+          {!Object.values(currentValues).some(v=>v) && (
+            <div style={{ borderRadius:14, border:`1px dashed ${C.teal}30`, background:C.teal+"06", padding:16, marginBottom:14, textAlign:"center" }}>
+              <div style={{ fontSize:13, color:"#555", marginBottom:10 }}>Import from PDF or paste lab text</div>
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={()=>setImportState({open:true,status:"paste",progress:"",detected:[],imageUrl:null,error:null})}
+                  style={{ flex:1, padding:"9px 0", borderRadius:10, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:13, fontWeight:500 }}>
+                  Paste text
+                </button>
+                <label htmlFor="lab-file-input" style={{ flex:1, padding:"9px 0", borderRadius:10, background:"transparent", border:`1px solid ${C.teal}40`, color:C.teal, cursor:"pointer", fontSize:13, textAlign:"center", display:"block" }}>
+                  Upload PDF
+                </label>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14 }}>
+            {currentMarkers.map(m => {
+              const raw = currentValues[m.id];
+              const hasVal = raw !== undefined && raw !== "";
+              const val = hasVal ? parseFloat(raw) : null;
+              const result = (hasVal && !isNaN(val)) ? m.evaluate(val) : null;
+              const col = result ? statusColor(result.status) : C.border;
+              return (
+                <div key={m.id} style={{ background:C.card, borderRadius:14, border:`1px solid ${result?col+"40":C.border}`, padding:"12px 14px" }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+                    <div style={{ fontSize:11, color:"#888" }}>{m.name}</div>
+                    {result && <Badge status={result.status} />}
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                    <input type="number" value={raw||""} onChange={e=>setCurrentValues(p=>({...p,[m.id]:e.target.value}))}
+                      placeholder={m.placeholder} step="any"
+                      style={{ flex:1, background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 10px", color:"#fff", fontSize:14, minWidth:0 }} />
+                    <span style={{ fontSize:10, color:"#444", whiteSpace:"nowrap" }}>{m.unit}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ background:C.card, borderRadius:14, border:`1px solid ${C.border}`, padding:"12px 14px" }}>
+            <div style={{ display:"flex", gap:8, marginBottom:8, flexWrap:"wrap" }}>
+              <input type="date" value={currentDate} onChange={e=>setCurrentDate(e.target.value)}
+                style={{ background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 10px", color:"#fff", fontSize:13 }} />
+              <input type="text" value={currentLabel} onChange={e=>setCurrentLabel(e.target.value)} placeholder="Label (optional)"
+                style={{ flex:1, background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 10px", color:"#fff", fontSize:13, minWidth:80 }} />
+            </div>
+            <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+              {saveMsg && <span style={{ fontSize:12, color:saveMsg.includes("fail")?C.red:C.teal }}>{saveMsg}</span>}
+              {cloudSyncing && <span style={{ fontSize:12, color:"#555" }}>Syncing…</span>}
+              <button onClick={()=>setCurrentValues({})} style={{ padding:"9px 14px", borderRadius:10, background:"transparent", border:`1px solid ${C.border}`, color:"#555", cursor:"pointer", fontSize:13 }}>Clear</button>
+              <button onClick={saveTest} style={{ flex:1, padding:"9px 0", borderRadius:10, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:13, fontWeight:500 }}>Save test</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  // ── PROFILE ──────────────────────────────────────────────────────────────────
+  const ProfileTab = () => (
+    <div style={{ paddingBottom:100 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:24, padding:"16px", background:C.card, borderRadius:16, border:`1px solid ${C.border}` }}>
+        <div style={{ width:48, height:48, borderRadius:"50%", background:C.teal+"18", border:`1px solid ${C.teal}30`, display:"flex", alignItems:"center", justifyContent:"center", color:C.teal, fontSize:18, fontWeight:500 }}>
+          {initials}
+        </div>
+        <div>
+          <div style={{ fontSize:15, fontWeight:500 }}>{user.email}</div>
+          <div style={{ fontSize:12, color:"#555", marginTop:2 }}>{sessions.length} tests saved</div>
+        </div>
+      </div>
+
+      {/* Biological profile */}
+      <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8 }}>Biological profile</div>
+      <div style={{ background:C.card, borderRadius:16, border:`1px solid ${C.border}`, padding:"16px", marginBottom:16 }}>
+        <div style={{ marginBottom:16 }}>
+          <div style={{ fontSize:12, color:"#888", marginBottom:8 }}>Biological sex</div>
+          <div style={{ display:"flex", gap:6 }}>
+            {[["male","Male"],["female","Female"],["other","Other"]].map(([val,lbl]) => (
+              <button key={val} onClick={()=>setProfile(p=>({...p,sex:val}))}
+                style={{ flex:1, padding:"8px 0", borderRadius:10, border:`1px solid ${profile.sex===val?C.teal:C.border}`, background:profile.sex===val?C.teal+"15":"transparent", color:profile.sex===val?C.teal:"#666", cursor:"pointer", fontSize:13 }}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginBottom:16 }}>
+          <div style={{ fontSize:12, color:"#888", marginBottom:8 }}>
+            Date of birth {profile.birthDate && <span style={{ color:C.teal }}>— age {age}</span>}
+          </div>
+          <DateOfBirthPicker value={profile.birthDate||""} onChange={v=>setProfile(p=>({...p,birthDate:v}))} />
+        </div>
+
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+          <ProfileField label="Height (cm)" value={profile.height||""} onChange={v=>setProfile(p=>({...p,height:v}))} type="number" placeholder="e.g. 175" />
+          <ProfileField label="Weight (kg)" value={profile.weight||""} onChange={v=>setProfile(p=>({...p,weight:v}))} type="number" placeholder="e.g. 70" />
+        </div>
+      </div>
+
+      {/* Lifestyle */}
+      <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8 }}>Lifestyle</div>
+      <div style={{ background:C.card, borderRadius:16, border:`1px solid ${C.border}`, padding:"16px", marginBottom:16 }}>
+        <div style={{ marginBottom:16 }}>
+          <div style={{ fontSize:12, color:"#888", marginBottom:8 }}>
+            Exercise hours per week
+            {profile.exerciseHours >= 8 && <span style={{ color:C.teal, fontSize:11 }}> · Athlete profile active</span>}
+          </div>
+          <select value={profile.exerciseHours} onChange={e=>setProfile(p=>({...p,exerciseHours:Number(e.target.value)}))}
+            style={{ width:"100%", background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 10px", color:"#fff", fontSize:14 }}>
+            <option value={0}>0 hours — Sedentary</option>
+            {[1,2,3,4,5,6,7].map(h => <option key={h} value={h}>{h} hour{h>1?"s":""} per week</option>)}
+            <option value={8}>8 hours per week</option>
+            {[9,10,11,12,13,14].map(h => <option key={h} value={h}>{h} hours per week</option>)}
+            <option value={15}>More than 14 hours per week</option>
+          </select>
+        </div>
+
+        <div>
+          <div style={{ fontSize:12, color:"#888", marginBottom:10 }}>Diet type</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            {DIET_OPTIONS.map(opt => (
+              <button key={opt.id} onClick={()=>setProfile(p=>({...p,dietType:opt.id}))}
+                style={{ padding:"10px 14px", borderRadius:10, border:`1px solid ${profile.dietType===opt.id?C.teal:C.border}`, background:profile.dietType===opt.id?C.teal+"15":"transparent", color:profile.dietType===opt.id?C.teal:"#888", cursor:"pointer", fontSize:13, textAlign:"left" }}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Health details */}
+      <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:8 }}>Health details</div>
+      <div style={{ background:C.card, borderRadius:16, border:`1px solid ${C.border}`, padding:"16px", marginBottom:16 }}>
+        <div style={{ marginBottom:16 }}>
+          <div style={{ fontSize:12, color:"#888", marginBottom:8 }}>Blood type</div>
+          <select value={profile.bloodType||""} onChange={e=>setProfile(p=>({...p,bloodType:e.target.value}))}
+            style={{ width:"100%", background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 10px", color:profile.bloodType?"#fff":"#444", fontSize:14 }}>
+            <option value="">Select blood type</option>
+            {["A+","A-","B+","B-","AB+","AB-","O+","O-"].map(bt => <option key={bt} value={bt} style={{ background:"#1a1a1a" }}>{bt}</option>)}
+          </select>
+        </div>
+
+        {/* Altitude / city */}
+        <div>
+          <div style={{ fontSize:12, color:"#888", marginBottom:8 }}>
+            Location & altitude
+            {profile.altitudeSource === "gps" && <span style={{ color:C.teal, fontSize:11 }}> · Detected via GPS</span>}
+            {profile.altitudeSource === "city" && <span style={{ color:C.teal, fontSize:11 }}> · {profile.resolvedCity}</span>}
+          </div>
+          {profile.altitudeM > 0 && (
+            <div style={{ fontSize:13, color:C.teal, marginBottom:10, padding:"6px 12px", background:C.teal+"10", borderRadius:8 }}>
+              {profile.altitudeM}m above sea level
+              {profile.altitudeM >= 2000 && " · High altitude adjustments active"}
+            </div>
+          )}
+          <div style={{ display:"flex", gap:8 }}>
+            <input type="text" value={cityInput} onChange={e=>setCityInput(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&handleCitySearch()}
+              placeholder="e.g. Bogotá, Medellín, Mexico City"
+              style={{ flex:1, background:"#0a0a0a", border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 10px", color:"#fff", fontSize:13 }} />
+            <button onClick={handleCitySearch} disabled={altitudeLoading}
+              style={{ padding:"8px 14px", borderRadius:8, background:C.teal, border:"none", color:"#000", cursor:"pointer", fontSize:13, opacity:altitudeLoading?0.5:1 }}>
+              {altitudeLoading ? "…" : "Search"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Personalization info */}
+      <div style={{ background:C.card, borderRadius:16, border:`1px solid ${C.border}`, padding:"14px 16px", marginBottom:16 }}>
+        <div style={{ fontSize:12, color:"#666", marginBottom:10 }}>Active personalizations</div>
+        <div style={{ display:"flex", flexDirection:"column", gap:6, fontSize:12, color:"#555" }}>
+          <div style={{ display:"flex", gap:8 }}><span style={{ color:C.teal }}>♀/♂</span><span>Reference ranges adjust for your biological sex</span></div>
+          <div style={{ display:"flex", gap:8 }}><span style={{ color:C.teal }}>Age</span><span>TSH, Vitamin D & eGFR thresholds adjust after 60</span></div>
+          {profile.exerciseHours >= 8 && <div style={{ display:"flex", gap:8 }}><span style={{ color:C.teal }}>🏃</span><span>Athlete recommendations active ({profile.exerciseHours}h/week)</span></div>}
+          {profile.altitudeM >= 2000 && <div style={{ display:"flex", gap:8 }}><span style={{ color:C.teal }}>⛰</span><span>High altitude adjustments active ({profile.altitudeM}m) — hemoglobin, ferritin, hematocrit</span></div>}
+          {profile.dietType !== "balanced" && <div style={{ display:"flex", gap:8 }}><span style={{ color:C.teal }}>🥗</span><span>Diet-specific tips active ({DIET_OPTIONS.find(d=>d.id===profile.dietType)?.label})</span></div>}
+        </div>
+      </div>
+
+      <button onClick={()=>sbClient.auth.signOut()} style={{ width:"100%", padding:"12px 0", borderRadius:12, background:"transparent", border:`1px solid ${C.border}`, color:"#555", cursor:"pointer", fontSize:14 }}>
+        Sign out
+      </button>
+    </div>
+  );
+
+  // ── NAV ──────────────────────────────────────────────────────────────────────
+  const NAV = [
+    { id:"dashboard", label:"Dashboard", icon:<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="6" height="6" rx="2" fill="currentColor"/><rect x="10" y="2" width="6" height="6" rx="2" fill="currentColor"/><rect x="2" y="10" width="6" height="6" rx="2" fill="currentColor"/><rect x="10" y="10" width="6" height="6" rx="2" fill="currentColor"/></svg> },
+    { id:"trends",    label:"Trends",    icon:<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 13 L5.5 8.5 L9 11 L12.5 6 L16 8.5" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg> },
+    { id:"tests",     label:"Tests",     icon:<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="3" y="2" width="12" height="14" rx="2" stroke="currentColor" strokeWidth="1.5"/><line x1="6" y1="7" x2="12" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><line x1="6" y1="10" x2="12" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg> },
+    { id:"profile",   label:"Profile",   icon:<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="7" r="3" stroke="currentColor" strokeWidth="1.5"/><path d="M3 16c0-3.3 2.7-5 6-5s6 1.7 6 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg> },
+  ];
+
+  return (
+    <div style={{ maxWidth:480, margin:"0 auto", background:C.bg, minHeight:"100vh", position:"relative" }}>
+      <input ref={fileInputRef} type="file" accept=".pdf,image/*" id="lab-file-input"
+        style={{ position:"absolute", width:1, height:1, opacity:0 }} onChange={handleFileChosen} />
+
+      {selectedMarker && (
+        <MarkerDetailScreen
+          analysis={selectedMarker}
+          profile={fullProfile}
+          onClose={()=>setSelectedMarker(null)}
+        />
+      )}
+      {importState.open && (
+        <ImportModal
+          state={importState}
+          onToggle={handleToggle}
+          onApply={applyImport}
+          onAnalyzeText={detected => setImportState(s=>({...s, status:"done", detected}))}
+          onClose={()=>setImportState(s=>({...s,open:false}))}
+        />
+      )}
+
+      {/* Header */}
+      <div style={{ padding:"52px 20px 16px", display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
+        <div>
+          <div style={{ fontSize:12, color:"#444" }}>Good day</div>
+          <div style={{ fontSize:22, fontWeight:500, letterSpacing:"-0.3px", marginTop:2 }}>{mainTab.charAt(0).toUpperCase()+mainTab.slice(1)}</div>
+        </div>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          {mainTab === "tests" && !showTestForm && (
+            <button onClick={()=>setImportState({open:true,status:"paste",progress:"",detected:[],imageUrl:null,error:null})}
+              style={{ padding:"7px 12px", borderRadius:10, background:C.teal+"15", border:`1px solid ${C.teal}30`, color:C.teal, cursor:"pointer", fontSize:12 }}>
+              Import
+            </button>
+          )}
+          <div style={{ width:34, height:34, borderRadius:"50%", background:C.teal+"18", border:`1px solid ${C.teal}30`, display:"flex", alignItems:"center", justifyContent:"center", color:C.teal, fontSize:13, fontWeight:500 }}>
+            {initials}
+          </div>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div style={{ padding:"0 20px" }}>
+        {mainTab==="dashboard" && <DashboardTab />}
+        {mainTab==="trends"    && <TrendsTab />}
+        {mainTab==="tests"     && <TestsTab />}
+        {mainTab==="profile"   && <ProfileTab />}
+      </div>
+
+      {/* Bottom nav */}
+      <div style={{ position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, background:"#0c0c0c", borderTop:`1px solid ${C.border}`, display:"flex", justifyContent:"space-around", padding:"10px 0 24px", zIndex:30 }}>
+        {NAV.map(n => {
+          const active = mainTab===n.id;
+          return (
+            <button key={n.id} onClick={()=>{ setMainTab(n.id); if(n.id!=="tests") setShowTestForm(false); }}
+              style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4, background:"none", border:"none", cursor:"pointer", color:active?C.teal:"#333", padding:"0 16px" }}>
+              {n.icon}
+              <span style={{ fontSize:10 }}>{n.label}</span>
+              {active && <div style={{ width:16, height:2, background:C.teal, borderRadius:1 }} />}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<Innermark />);
+  </script>
+</body>
+</html>

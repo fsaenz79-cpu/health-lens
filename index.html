@@ -2689,11 +2689,11 @@ function Innermark() {
 
       {/* Content */}
       <div style={{ padding:"0 20px" }}>
-        {mainTab==="dashboard" && <DashboardTab />}
-        {mainTab==="fitness"   && <FitnessTab />}
-        {mainTab==="trends"    && <TrendsTab />}
-        {mainTab==="tests"     && <TestsTab />}
-        {mainTab==="profile"   && <ProfileTab />}
+        {mainTab==="dashboard" && DashboardTab()}
+        {mainTab==="fitness"   && FitnessTab()}
+        {mainTab==="trends"    && TrendsTab()}
+        {mainTab==="tests"     && TestsTab()}
+        {mainTab==="profile"   && ProfileTab()}
       </div>
 
       {/* Floating chat button */}
